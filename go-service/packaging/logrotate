@@ -1,0 +1,10 @@
+/var/log/modd-hosting/controller.log {
+    size 50M
+    rotate 10
+    maxage 30
+    compress
+    copytruncate
+    missingok
+    notifempty
+}
+

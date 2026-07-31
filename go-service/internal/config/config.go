@@ -1,0 +1,152 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/pelletier/go-toml/v2"
+)
+
+type Config struct {
+	Server     Server     `toml:"server"`
+	Auth       Auth       `toml:"auth"`
+	ZFS        ZFS        `toml:"zfs"`
+	State      State      `toml:"state"`
+	Caddy      Caddy      `toml:"caddy"`
+	Docker     Docker     `toml:"docker"`
+	Deployment Deployment `toml:"deployment"`
+	Domains    Domains    `toml:"domains"`
+	GoogleChat GoogleChat `toml:"google_chat"`
+	Logging    Logging    `toml:"logging"`
+}
+
+type Server struct {
+	Listen          string        `toml:"listen"`
+	RequestTimeout  time.Duration `toml:"-"`
+	ShutdownTimeout time.Duration `toml:"-"`
+	RequestRaw      string        `toml:"request_timeout"`
+	ShutdownRaw     string        `toml:"shutdown_timeout"`
+}
+type Auth struct {
+	BearerTokenFile string `toml:"bearer_token_file"`
+}
+type ZFS struct {
+	DatasetPrefix string `toml:"dataset_prefix"`
+	MountPrefix   string `toml:"mount_prefix"`
+}
+type State struct {
+	ServicesDir   string `toml:"services_dir"`
+	TombstonesDir string `toml:"tombstones_dir"`
+	TemplatesDir  string `toml:"templates_dir"`
+}
+type Caddy struct {
+	ServiceConfigDir string   `toml:"service_config_dir"`
+	SuspensionRoot   string   `toml:"suspension_root"`
+	ValidateCommand  []string `toml:"validate_command"`
+	ReloadCommand    []string `toml:"reload_command"`
+}
+type Docker struct {
+	Network         string   `toml:"network"`
+	ImageRepository string   `toml:"image_repository"`
+	RestartPolicy   string   `toml:"restart_policy"`
+	Binds           []string `toml:"binds"`
+	Environment     []string `toml:"environment"`
+}
+type Deployment struct {
+	HealthPath         string        `toml:"health_path"`
+	HealthAttempts     int           `toml:"health_attempts"`
+	HealthInitialDelay time.Duration `toml:"-"`
+	HealthBackoff      time.Duration `toml:"-"`
+	TrafficDrain       time.Duration `toml:"-"`
+	SocketRoot         string        `toml:"socket_root"`
+	HealthInitialRaw   string        `toml:"health_initial_delay"`
+	HealthBackoffRaw   string        `toml:"health_backoff_increment"`
+	TrafficDrainRaw    string        `toml:"traffic_drain"`
+}
+type Domains struct {
+	StagingSuffix string `toml:"staging_suffix"`
+}
+type GoogleChat struct {
+	WebhookURLFile string `toml:"webhook_url_file"`
+}
+type Logging struct {
+	Path string `toml:"path"`
+}
+
+func Load(path string) (Config, error) {
+	var c Config
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return c, err
+	}
+	if err = toml.Unmarshal(b, &c); err != nil {
+		return c, fmt.Errorf("parse config: %w", err)
+	}
+	durations := []struct {
+		raw string
+		dst *time.Duration
+	}{
+		{c.Server.RequestRaw, &c.Server.RequestTimeout},
+		{c.Server.ShutdownRaw, &c.Server.ShutdownTimeout},
+		{c.Deployment.HealthInitialRaw, &c.Deployment.HealthInitialDelay},
+		{c.Deployment.HealthBackoffRaw, &c.Deployment.HealthBackoff},
+		{c.Deployment.TrafficDrainRaw, &c.Deployment.TrafficDrain},
+	}
+	for _, item := range durations {
+		if *item.dst, err = time.ParseDuration(item.raw); err != nil {
+			return c, fmt.Errorf("invalid duration %q: %w", item.raw, err)
+		}
+	}
+	return c, c.Validate()
+}
+
+func (c Config) Validate() error {
+	if _, _, err := net.SplitHostPort(c.Server.Listen); err != nil {
+		return fmt.Errorf("invalid server.listen: %w", err)
+	}
+	if c.Server.RequestTimeout <= 0 || c.Server.ShutdownTimeout <= 0 {
+		return errors.New("server timeouts must be positive")
+	}
+	if c.ZFS.DatasetPrefix == "" || strings.HasPrefix(c.ZFS.DatasetPrefix, "/") || strings.Contains(c.ZFS.DatasetPrefix, "..") {
+		return errors.New("zfs.dataset_prefix must be a safe dataset name")
+	}
+	for name, path := range map[string]string{
+		"zfs.mount_prefix": c.ZFS.MountPrefix, "state.services_dir": c.State.ServicesDir,
+		"state.tombstones_dir": c.State.TombstonesDir, "caddy.service_config_dir": c.Caddy.ServiceConfigDir,
+		"deployment.socket_root": c.Deployment.SocketRoot, "logging.path": c.Logging.Path,
+	} {
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("%s must be absolute", name)
+		}
+	}
+	if c.Docker.ImageRepository == "" || c.Docker.Network == "" {
+		return errors.New("docker image_repository and network are required")
+	}
+	if c.Deployment.HealthAttempts < 1 || c.Deployment.HealthInitialDelay < 0 || c.Deployment.HealthBackoff < 0 || c.Deployment.TrafficDrain < 0 {
+		return errors.New("deployment health settings and traffic drain are invalid")
+	}
+	if c.Domains.StagingSuffix == "" {
+		return errors.New("domains.staging_suffix is required")
+	}
+	if c.Auth.BearerTokenFile == "" {
+		return errors.New("auth.bearer_token_file is required")
+	}
+	return nil
+}
+
+func ReadSecret(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(b))
+	if value == "" {
+		return "", errors.New("secret file is empty")
+	}
+	return value, nil
+}

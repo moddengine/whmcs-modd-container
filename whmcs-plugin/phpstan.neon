@@ -1,0 +1,7 @@
+parameters:
+    level: 6
+    paths:
+        - modules
+    scanFiles:
+        - stubs/whmcs.php
+    tmpDir: /tmp/whmcs-plugin-phpstan

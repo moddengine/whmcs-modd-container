@@ -1,0 +1,19 @@
+[Unit]
+Description=Modd Hosting Controller
+After=docker.service zfs-mount.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/modd-hosting-controller -config /etc/modd-hosting/controller.toml
+Restart=on-failure
+User=root
+Group=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/modd-hosting /var/log/modd-hosting /run/moddengine /modd/sites
+
+[Install]
+WantedBy=multi-user.target
+

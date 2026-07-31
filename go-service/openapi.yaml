@@ -1,0 +1,244 @@
+openapi: 3.1.0
+info:
+  title: Modd Hosting Controller API
+  version: 1.0.0
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: https://controller.example:8443
+    description: Public Caddy endpoint; Caddy proxies to the controller over HTTP
+security:
+  - bearerAuth: []
+paths:
+  /v1/health:
+    get:
+      summary: Check daemon liveness
+      security: []
+      operationId: health
+      responses:
+        "200":
+          description: Daemon is serving requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+                required: [status]
+        "400": { $ref: "#/components/responses/Error" }
+  /v1/info:
+    get:
+      summary: Get controller build and configuration information
+      operationId: info
+      responses:
+        "200": { $ref: "#/components/responses/JSONObject" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/image/versions:
+    get:
+      summary: List locally available image versions
+      operationId: imageVersions
+      responses:
+        "200":
+          description: Locally available versions from the configured repository
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: "#/components/schemas/ImageVersion" }
+                required: [versions]
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/log:
+    get:
+      summary: Read the controller log tail
+      operationId: daemonLog
+      responses:
+        "200":
+          description: Last 250 daemon log lines
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lines: { type: array, items: { type: string } }
+                  limit: { type: integer, const: 250 }
+                required: [lines, limit]
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/services:
+    get:
+      summary: List services and observed status
+      operationId: listServices
+      responses:
+        "200":
+          description: Non-deleted services
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items: { $ref: "#/components/schemas/ServiceStatus" }
+                required: [services]
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/services/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ServiceID"
+    get:
+      summary: Get one service and observed status
+      operationId: getService
+      responses:
+        "200":
+          description: Desired and observed service status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceStatus" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Provision a service
+      operationId: provisionService
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProvisionRequest" }
+            example:
+              main_domain: mysite.com
+              version: v21.6.24
+              display_name: My site
+      responses:
+        "200": { description: Existing identical service, content: { application/json: { schema: { $ref: "#/components/schemas/ServiceStatus" } } } }
+        "201": { description: Service provisioned, content: { application/json: { schema: { $ref: "#/components/schemas/ServiceStatus" } } } }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Permanently delete a terminated service
+      operationId: deleteService
+      responses:
+        "200": { $ref: "#/components/responses/JSONObject" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/services/{id}/suspend:
+    post:
+      summary: Suspend an active service
+      operationId: suspendService
+      parameters: [{ $ref: "#/components/parameters/ServiceID" }]
+      responses:
+        "200": { $ref: "#/components/responses/ServiceStatus" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/services/{id}/resume:
+    post:
+      summary: Resume a suspended or terminated service
+      operationId: resumeService
+      parameters: [{ $ref: "#/components/parameters/ServiceID" }]
+      responses:
+        "200": { $ref: "#/components/responses/ServiceStatus" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /v1/services/{id}/terminate:
+    post:
+      summary: Terminate a service while preserving data
+      operationId: terminateService
+      parameters: [{ $ref: "#/components/parameters/ServiceID" }]
+      responses:
+        "200": { $ref: "#/components/responses/ServiceStatus" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/services/{id}/upgrade:
+    post:
+      summary: Deploy an image version using blue-green switching
+      operationId: upgradeService
+      parameters: [{ $ref: "#/components/parameters/ServiceID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpgradeRequest" }
+            example:
+              version: v21.6.24
+              confirm_downgrade: true
+      responses:
+        "200": { $ref: "#/components/responses/ServiceStatus" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    ServiceID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^whmcs-[1-9][0-9]*$'
+  schemas:
+    ProvisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        main_domain: { type: string, format: hostname }
+        staging_domain: { type: string, format: hostname }
+        version: { type: string, minLength: 1 }
+        display_name: { type: string }
+      required: [main_domain, version]
+    UpgradeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        version: { type: string, minLength: 1 }
+        confirm_downgrade: { type: boolean, default: false }
+      required: [version]
+    ImageVersion:
+      type: object
+      properties:
+        version: { type: string }
+        image_reference: { type: string }
+        local: { type: boolean }
+        created_at: { type: string, format: date-time }
+      required: [version, image_reference, local]
+    ServiceStatus:
+      type: object
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [active, suspended, terminated, deleted] }
+        main_domain: { type: string }
+        staging_domain: { type: string }
+        version: { type: string }
+        live_deploy: { type: string, enum: [blue, green] }
+        dataset_exists: { type: boolean }
+        dataset_used_bytes: { type: integer, minimum: 0 }
+        containers: { type: array, items: { type: object } }
+        metrics: { type: object }
+        warnings: { type: array, items: { type: string } }
+      required: [id, state, main_domain, staging_domain, version, live_deploy, warnings]
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+          required: [code, message, request_id]
+      required: [error]
+  responses:
+    ServiceStatus:
+      description: Service status
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ServiceStatus" }
+    Error:
+      description: Structured error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    JSONObject:
+      description: JSON response
+      content:
+        application/json:
+          schema: { type: object }

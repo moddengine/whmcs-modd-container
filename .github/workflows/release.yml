@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-service/go.mod
+          cache-dependency-path: go-service/go.sum
+
+      - name: Build controller
+        working-directory: go-service
+        env:
+          BINARY: modd-hosting-controller-linux-x86_64
+          COMMIT: ${{ github.sha }}
+          GOARCH: amd64
+          GOOS: linux
+          VERSION: ${{ github.ref_name }}
+        run: |
+          ./build.sh test
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" ./build.sh
+
+      - name: Package WHMCS plugin
+        working-directory: whmcs-plugin
+        run: zip -r "../modd-hosting-whmcs-${GITHUB_REF_NAME}.zip" modules
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME"
+          "go-service/modd-hosting-controller-linux-x86_64"
+          "modd-hosting-whmcs-${GITHUB_REF_NAME}.zip"
+          --generate-notes
+          --title "$GITHUB_REF_NAME"
