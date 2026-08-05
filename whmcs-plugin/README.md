@@ -9,9 +9,10 @@ Create a WHMCS server using module `Modd Container Hosting`:
 - port: public Caddy HTTPS port (normally 443);
 - password: shared bearer token (WHMCS stores this encrypted).
 
-Set each product's image version in module setting 1. Activate the `Modd
-Hosting` addon and grant access only to administrator roles that may perform
-hosting lifecycle actions.
+Choose the image version on each service's admin page; choices come from the
+controller with the most recent image first. Save the service before running
+Create. Activate the `Modd Hosting` addon and grant access only to administrator
+roles that may perform hosting lifecycle actions.
 
 Automatic WHMCS termination intentionally returns an error. Termination,
 permanent deletion, upgrades, bulk upgrades, status, and controller logs live

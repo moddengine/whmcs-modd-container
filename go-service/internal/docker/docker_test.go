@@ -1,12 +1,53 @@
 package docker
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/docker/docker/client"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 )
+
+func TestStopAllReconcilesEveryContainerState(t *testing.T) {
+	stopped := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/json"):
+			_, _ = io.WriteString(w, `[{"Id":"restarting","State":"restarting"},{"Id":"exited","State":"exited"}]`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/stop"):
+			stopped++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	api, err := client.NewClientWithOpts(client.WithHost(server.URL), client.WithHTTPClient(server.Client()), client.WithVersion("1.52"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &Adapter{client: api}
+	if err := adapter.StopAll(t.Context(), "whmcs-123"); err != nil || stopped != 2 {
+		t.Fatalf("StopAll() stopped %d containers: %v", stopped, err)
+	}
+}
+
+func TestSortVersionsNewestFirst(t *testing.T) {
+	versions := []model.ImageVersion{
+		{Version: "old", CreatedAt: time.Unix(1, 0)},
+		{Version: "new", CreatedAt: time.Unix(2, 0)},
+	}
+	sortVersionsNewestFirst(versions)
+	if versions[0].Version != "new" {
+		t.Fatalf("newest version must be first: %#v", versions)
+	}
+}
 
 func TestContainerSpec(t *testing.T) {
 	service := model.Service{

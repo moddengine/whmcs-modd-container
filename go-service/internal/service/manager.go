@@ -236,12 +236,9 @@ func (m *Manager) changeState(ctx context.Context, id, requestID, target string)
 	if err != nil {
 		return nil, err
 	}
-	if service.State == target {
-		return m.status(ctx, service)
-	}
 	switch target {
 	case model.Suspended:
-		if service.State != model.Active {
+		if service.State != model.Active && service.State != model.Suspended {
 			return nil, conflict(fmt.Errorf("cannot suspend service from %s", service.State))
 		}
 		if err := m.Docker.StopAll(ctx, id); err != nil {
@@ -251,7 +248,7 @@ func (m *Manager) changeState(ctx context.Context, id, requestID, target string)
 			return nil, unprocessable("caddy_failed", err)
 		}
 	case model.Terminated:
-		if service.State != model.Active && service.State != model.Suspended {
+		if service.State != model.Active && service.State != model.Suspended && service.State != model.Terminated {
 			return nil, conflict(fmt.Errorf("cannot terminate service from %s", service.State))
 		}
 		if err := m.Docker.StopAll(ctx, id); err != nil {
@@ -273,7 +270,7 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if tombstone, err := m.Repo.GetTombstone(id); err == nil && tombstone.State == model.Deleted {
-		return nil
+		return m.Repo.DeleteLive(id)
 	} else if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return internal(err)
 	}
@@ -339,7 +336,9 @@ func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeReque
 		return nil, internal(err)
 	}
 	if !configured || mode != "proxy" || socket != service.Deploy[service.LiveDeploy].Socket {
-		return nil, conflict(errors.New("service TOML and Caddy live deployment disagree"))
+		if err := m.Caddy.Active(ctx, id, domains(service), service.Deploy[service.LiveDeploy].Socket); err != nil {
+			return nil, internal(fmt.Errorf("restore Caddy live deployment: %w", err))
+		}
 	}
 	target := opposite(service.LiveDeploy)
 	updated := service

@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 )
@@ -155,10 +156,8 @@ func (a *Adapter) StopAll(ctx context.Context, serviceID string) error {
 		return err
 	}
 	for _, item := range items {
-		if item.Running {
-			if err := a.Stop(ctx, item.ID); err != nil {
-				return err
-			}
+		if err := a.Stop(ctx, item.ID); err != nil && !errdefs.IsNotModified(err) {
+			return err
 		}
 	}
 	return nil
@@ -211,8 +210,12 @@ func (a *Adapter) Versions(ctx context.Context) ([]model.ImageVersion, error) {
 			})
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Version < result[j].Version })
+	sortVersionsNewestFirst(result)
 	return result, nil
+}
+
+func sortVersionsNewestFirst(versions []model.ImageVersion) {
+	sort.Slice(versions, func(i, j int) bool { return versions[i].CreatedAt.After(versions[j].CreatedAt) })
 }
 
 func (a *Adapter) HasVersion(ctx context.Context, version string) (bool, error) {

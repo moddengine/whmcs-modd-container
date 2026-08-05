@@ -44,5 +44,9 @@ func (a Adapter) Destroy(ctx context.Context, id, dataset string) error {
 	if dataset != expected || !strings.HasPrefix(dataset, a.Prefix+"/") {
 		return fmt.Errorf("refusing to destroy unexpected dataset %q", dataset)
 	}
+	exists, err := a.Exists(ctx, id)
+	if err != nil || !exists {
+		return err
+	}
 	return exec.CommandContext(ctx, "zfs", "destroy", "-r", expected).Run()
 }

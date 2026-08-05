@@ -237,11 +237,13 @@ In WHMCS:
 
 1. Add a server using module **Modd Container Hosting**.
 2. Set its hostname to the controller's HTTPS Caddy hostname.
-3. Set the port, normally `8443`.
+3. Set the public Caddy HTTPS port, normally `443`.
 4. Store the bearer token as the server password.
-5. Create a product using that server and set **Image Version** to a local tag.
-6. Leave **Staging Domain** blank for automatic derivation.
-7. Activate **Modd Hosting** under addon modules and restrict it to trusted
+5. Create a product using that server.
+6. On each service, select **Image Version** from the controller-provided list,
+   then save the service before provisioning it.
+7. Leave **Staging Domain** blank for automatic derivation.
+8. Activate **Modd Hosting** under addon modules and restrict it to trusted
    administrator roles.
 
 The provisioning module creates, suspends, resumes, and displays services. The

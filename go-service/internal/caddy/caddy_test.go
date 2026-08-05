@@ -26,4 +26,12 @@ func TestRenderAndStatus(t *testing.T) {
 	if strings.Contains(string(content), "import") {
 		t.Fatal("renderer allowed unexpected directives")
 	}
+	replacement := "/run/moddengine/whmcs-123-green/http.sock"
+	if err := adapter.Active(context.Background(), "whmcs-123", []string{"example.com"}, replacement); err != nil {
+		t.Fatal(err)
+	}
+	_, _, gotSocket, err = adapter.Status("whmcs-123")
+	if err != nil || gotSocket != replacement {
+		t.Fatalf("Active() did not replace stale config: %q, %v", gotSocket, err)
+	}
 }
