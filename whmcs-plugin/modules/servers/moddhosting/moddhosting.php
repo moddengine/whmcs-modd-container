@@ -18,7 +18,7 @@ function moddhosting_MetaData(): array
         'DisplayName' => 'Modd Container Hosting',
         'APIVersion' => '1.1',
         'RequiresServer' => true,
-        'DefaultSSLPort' => 8443,
+        'DefaultSSLPort' => 443,
     ];
 }
 
@@ -134,8 +134,8 @@ function moddhosting_client(array $params): ApiClient
     if ($host === '') {
         throw new \InvalidArgumentException('Controller hostname is required');
     }
-    $port = (int) ($params['serverport'] ?? 8443);
-    return new ApiClient('https://' . $host . ':' . ($port ?: 8443), (string) $params['serverpassword']);
+    $port = (int) ($params['serverport'] ?? 443);
+    return new ApiClient('https://' . $host . ':' . ($port ?: 443), (string) $params['serverpassword']);
 }
 
 /** @param array<string, mixed> $params */

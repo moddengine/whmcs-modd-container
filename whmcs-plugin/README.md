@@ -6,7 +6,7 @@ matching WHMCS directories.
 Create a WHMCS server using module `Modd Container Hosting`:
 
 - hostname: the HTTPS Caddy proxy hostname;
-- port: controller port (normally 8443);
+- port: public Caddy HTTPS port (normally 443);
 - password: shared bearer token (WHMCS stores this encrypted).
 
 Set each product's image version in module setting 1. Activate the `Modd

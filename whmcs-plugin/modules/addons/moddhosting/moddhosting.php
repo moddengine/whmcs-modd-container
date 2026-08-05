@@ -266,7 +266,7 @@ function moddhosting_client_from_server(object $server): ApiClient
     if ($host === '') {
         throw new \RuntimeException('Controller hostname is missing.');
     }
-    return new ApiClient('https://' . $host . ':' . ((int) $server->port ?: 8443), decrypt((string) $server->password));
+    return new ApiClient('https://' . $host . ':' . ((int) $server->port ?: 443), decrypt((string) $server->password));
 }
 
 function moddhosting_valid_id(string $id): string
