@@ -135,7 +135,7 @@ Operations may report that work is in progress or failed, but the canonical serv
 
 - Service TOML exists.
 - ZFS dataset and service files remain untouched.
-- Application containers are stopped.
+- Application containers are removed.
 - The individual Caddyfile is removed or disabled.
 - The domains are no longer intentionally served by this service.
 - A terminated service may be resumed.
@@ -621,7 +621,7 @@ Send a Google Chat notification on successful resume.
 
 #### `POST /v1/services/{id}/terminate`
 
-- Stop all service containers.
+- Remove all service containers.
 - Remove the individual Caddyfile.
 - Reload or validate Caddy.
 - Preserve the ZFS dataset and all service files.
@@ -700,7 +700,6 @@ reload_command = ["docker", "exec", "caddy", "caddy", "reload", "--config", "/et
 [docker]
 network = "udo-net"
 image_repository = "moddengine/moddengine"
-restart_policy = "always"
 
 [deployment]
 health_path = "/~/health/check"
@@ -1993,7 +1992,7 @@ Verify all applicable artifacts remain for debugging.
 
 ## 23.7 Terminate tests
 
-- Containers stop.
+- Both blue and green containers are removed.
 - Caddyfile removed.
 - Dataset remains.
 - Files remain.

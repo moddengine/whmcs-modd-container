@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	"github.com/moddengine/whmcs-container-controller/internal/isolation"
@@ -60,7 +61,7 @@ func TestContainerSpec(t *testing.T) {
 		Deploy:  map[string]model.Deploy{"blue": {Socket: "/run/moddengine/whmcs-123-blue/http.sock"}},
 	}
 	cfg := config.Docker{
-		Network: "udo-net", ImageRepository: "moddengine/moddengine", RestartPolicy: "always",
+		Network: "udo-net", ImageRepository: "moddengine/moddengine",
 		Binds:       []string{"{mountpoint}/{slot}/cache:/cache"},
 		Environment: []string{"SERVICE={service_id}", "DATA={mountpoint}", "DEPLOY={slot}"},
 	}
@@ -90,6 +91,9 @@ func TestContainerSpec(t *testing.T) {
 	}
 	if networking.EndpointsConfig["udo-net"] == nil {
 		t.Fatal("configured network missing")
+	}
+	if host.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
+		t.Fatalf("unexpected restart policy: %q", host.RestartPolicy.Name)
 	}
 }
 

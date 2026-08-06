@@ -50,7 +50,7 @@ Lifecycle states are:
 
 - `active`: application traffic routes to the live container;
 - `suspended`: containers are stopped and Caddy serves the suspension page;
-- `terminated`: containers are stopped and routing is removed, but data remains;
+- `terminated`: containers and routing are removed, but data remains;
 - `deleted`: containers and the ZFS dataset are removed, leaving a tombstone.
 
 Deletion is only allowed after termination. Automatic WHMCS termination is
@@ -174,7 +174,6 @@ The master Caddyfile is operator-owned; the controller only creates files in
 | --- | --- |
 | `docker.network` | Existing Docker network joined by every service container. |
 | `docker.image_repository` | Allowed image repository, without a tag. |
-| `docker.restart_policy` | Docker restart policy for service containers. |
 | `docker.binds` | Fixed bind mounts applied to every service container. |
 | `docker.environment` | Additional fixed `KEY=value` environment entries. |
 

@@ -116,7 +116,7 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 			User:  fmt.Sprintf("%d:%d", identity.UID, identity.GID), Env: env, Labels: labels,
 		}, &container.HostConfig{
 			Binds:         binds,
-			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyMode(cfg.RestartPolicy)},
+			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		}, &network.NetworkingConfig{
 			EndpointsConfig: map[string]*network.EndpointSettings{cfg.Network: {}},
 		}, nil

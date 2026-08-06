@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,21 @@ import (
 
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 )
+
+func TestCleanupOldDeploySurvivesRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	removed := false
+	if err := cleanupOldDeploy(ctx, 0, func(ctx context.Context) error {
+		removed = true
+		return ctx.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Fatal("old deployment was not removed")
+	}
+}
 
 func TestDomainAndVersionHelpers(t *testing.T) {
 	domain, err := NormalizeDomain("WWW.Example.COM.AU.")

@@ -259,7 +259,7 @@ func (m *Manager) changeState(ctx context.Context, id, requestID, target string)
 		if service.State != model.Active && service.State != model.Suspended && service.State != model.Terminated {
 			return nil, conflict(fmt.Errorf("cannot terminate service from %s", service.State))
 		}
-		if err := m.Docker.StopAll(ctx, id); err != nil {
+		if err := m.Docker.RemoveAll(ctx, id); err != nil {
 			return nil, unprocessable("terminate_failed", err)
 		}
 		if err := m.Caddy.Remove(ctx, id); err != nil {
@@ -382,19 +382,10 @@ func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeReque
 	if err := m.Caddy.Active(ctx, id, domains(updated), target); err != nil {
 		return nil, m.upgradeFailure(ctx, service, requestID, err)
 	}
-	if err := wait(ctx, m.Config.Deployment.TrafficDrain); err != nil {
+	if err := cleanupOldDeploy(ctx, m.Config.Deployment.TrafficDrain, func(cleanupCtx context.Context) error {
+		return m.Docker.RemoveSlot(cleanupCtx, id, service.LiveDeploy)
+	}); err != nil {
 		return nil, m.upgradeFailure(ctx, service, requestID, err)
-	}
-	containers, err := m.Docker.Containers(ctx, id)
-	if err != nil {
-		return nil, m.upgradeFailure(ctx, service, requestID, err)
-	}
-	for _, container := range containers {
-		if container.Deploy == service.LiveDeploy {
-			if err := m.Docker.Remove(ctx, container.ID, id); err != nil {
-				return nil, m.upgradeFailure(ctx, service, requestID, err)
-			}
-		}
 	}
 	updated.LiveDeploy, updated.LastError, updated.UpdatedAt = target, "", time.Now().UTC()
 	if err := m.Repo.Put(updated); err != nil {
@@ -652,6 +643,14 @@ func wait(ctx context.Context, duration time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func cleanupOldDeploy(ctx context.Context, drain time.Duration, remove func(context.Context) error) error {
+	ctx = context.WithoutCancel(ctx)
+	if err := wait(ctx, drain); err != nil {
+		return err
+	}
+	return remove(ctx)
 }
 
 func badRequest(err error) error { return &Error{Code: "invalid_request", Status: 400, Err: err} }

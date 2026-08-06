@@ -54,7 +54,6 @@ type Caddy struct {
 type Docker struct {
 	Network         string   `toml:"network"`
 	ImageRepository string   `toml:"image_repository"`
-	RestartPolicy   string   `toml:"restart_policy"`
 	Binds           []string `toml:"binds"`
 	Environment     []string `toml:"environment"`
 }

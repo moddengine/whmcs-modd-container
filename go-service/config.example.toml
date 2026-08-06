@@ -29,7 +29,6 @@ reload_command = ["docker", "exec", "caddy", "caddy", "reload", "--config", "/et
 [docker]
 network = "udo-net"
 image_repository = "moddengine/moddengine"
-restart_policy = "always"
 binds = [
   "{mountpoint}/site:/srv/modd/site",
   "{mountpoint}/backup:/srv/modd/backup",
