@@ -708,7 +708,7 @@ health_attempts = 30
 health_initial_delay = "3s"
 health_backoff_increment = "2s"
 traffic_drain = "10s"
-socket_root = "/run/moddengine"
+socket = "/run/moddengine/{service_id}-{slot}/http.sock"
 
 [domains]
 staging_suffix = "staging.com"

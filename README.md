@@ -104,7 +104,7 @@ Caddy must:
 
 - import `/etc/caddy/services/*.caddy`;
 - mount the controller's `caddy.service_config_dir` at `/etc/caddy/services`;
-- mount `deployment.socket_root` at the same path inside the container;
+- mount the host socket tree referenced by `deployment.socket` at the same path inside the container;
 - mount `caddy.suspension_root` read-only at the same path; and
 - expose the controller to WHMCS over HTTPS with a trusted certificate.
 
@@ -209,7 +209,7 @@ before changing mounts.
 | `deployment.health_initial_delay` | Delay before the first check. |
 | `deployment.health_backoff_increment` | Increasing delay between checks. |
 | `deployment.traffic_drain` | Wait before removing the old deployment. |
-| `deployment.socket_root` | Host and Caddy-visible Unix-socket root. |
+| `deployment.socket` | Host, container, and Caddy-visible Unix-socket path template; supports `{service_id}` and `{slot}`. |
 | `domains.staging_suffix` | Suffix used when WHMCS supplies no staging domain. |
 
 For example, `example.com` with suffix `staging.com` becomes

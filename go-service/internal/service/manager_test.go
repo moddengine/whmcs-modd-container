@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,10 +44,14 @@ func TestServiceID(t *testing.T) {
 
 func TestRemoveSocketDirs(t *testing.T) {
 	root := t.TempDir()
-	manager := Manager{Config: config.Config{Deployment: config.Deployment{SocketRoot: root}}}
+	socket := filepath.Join(root, "{service_id}-{slot}", "http.sock")
+	manager := Manager{Config: config.Config{Deployment: config.Deployment{Socket: socket}}}
 	for _, slot := range []string{"blue", "green"} {
-		dir := filepath.Dir(deployment(root, "whmcs-123", slot).Socket)
+		dir := filepath.Dir(deployment(socket, "whmcs-123", slot).Socket)
 		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "http.sock"), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -57,7 +62,66 @@ func TestRemoveSocketDirs(t *testing.T) {
 	if err := manager.removeSocketDirs("whmcs-123"); err != nil {
 		t.Fatal(err)
 	}
+	for _, slot := range []string{"blue", "green"} {
+		if _, err := os.Stat(deployment(socket, "whmcs-123", slot).Socket); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s socket was not removed", slot)
+		}
+	}
 	if _, err := os.Stat(sibling); err != nil {
 		t.Fatal("socket cleanup removed an unrelated directory")
+	}
+}
+
+func TestRemoveSocketDirsPreservesSharedDirectory(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "{slot}", "{service_id}.sock")
+	manager := Manager{Config: config.Config{Deployment: config.Deployment{Socket: socket}}}
+	for _, path := range []string{
+		deployment(socket, "whmcs-123", "blue").Socket,
+		deployment(socket, "whmcs-123", "green").Socket,
+		deployment(socket, "whmcs-456", "blue").Socket,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := manager.removeSocketDirs("whmcs-123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(deployment(socket, "whmcs-456", "blue").Socket); err != nil {
+		t.Fatal("socket cleanup removed another service's socket")
+	}
+}
+
+func TestRemoveSocketDirsWithInvertedTemplate(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "{slot}", "{service_id}", "http.sock")
+	manager := Manager{Config: config.Config{Deployment: config.Deployment{Socket: socket}}}
+	for _, slot := range []string{"blue", "green"} {
+		path := deployment(socket, "whmcs-123", slot).Socket
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := deployment(socket, "whmcs-456", "blue").Socket
+	if err := os.MkdirAll(filepath.Dir(other), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.removeSocketDirs("whmcs-123"); err != nil {
+		t.Fatal(err)
+	}
+	for _, slot := range []string{"blue", "green"} {
+		if _, err := os.Stat(filepath.Dir(deployment(socket, "whmcs-123", slot).Socket)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s socket directory was not removed", slot)
+		}
+	}
+	if _, err := os.Stat(filepath.Dir(other)); err != nil {
+		t.Fatal("socket cleanup removed another service's directory")
 	}
 }

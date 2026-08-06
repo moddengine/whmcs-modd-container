@@ -109,8 +109,8 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 	for _, bind := range cfg.Binds {
 		binds = append(binds, replacer.Replace(bind))
 	}
-	//socketDir := filepath.Dir(service.Deploy[slot].Socket)
-	//binds = append(binds, socketDir+":"+socketDir)
+	socketDir := filepath.Dir(service.Deploy[slot].Socket)
+	binds = append(binds, socketDir+":"+socketDir)
 	return &container.Config{
 			Image: cfg.ImageRepository + ":" + service.Version,
 			User:  fmt.Sprintf("%d:%d", identity.UID, identity.GID), Env: env, Labels: labels,

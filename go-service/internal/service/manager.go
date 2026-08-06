@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/moddengine/whmcs-container-controller/internal/caddy"
@@ -146,8 +147,8 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 			Dataset: model.DatasetRecord{Name: m.ZFS.Dataset(id), Mountpoint: m.ZFS.Mountpoint(id)},
 			Paths:   model.PathRecord{Caddyfile: m.Caddy.Path(id)},
 			Deploy: map[string]model.Deploy{
-				"blue":  deployment(m.Config.Deployment.SocketRoot, id, "blue"),
-				"green": deployment(m.Config.Deployment.SocketRoot, id, "green"),
+				"blue":  deployment(m.Config.Deployment.Socket, id, "blue"),
+				"green": deployment(m.Config.Deployment.Socket, id, "green"),
 			},
 		}
 		if err := m.Repo.Put(service); err != nil {
@@ -563,17 +564,32 @@ func (m *Manager) ensureIsolation(ctx context.Context, service model.Service) er
 }
 
 func (m *Manager) removeSocketDirs(id string) error {
+	dirPattern := filepath.Dir(m.Config.Deployment.Socket)
+	removeDir := strings.Contains(dirPattern, "{service_id}") || strings.Contains(dirPattern, "{slot}")
+	removeAll := strings.Contains(dirPattern, "{service_id}")
 	for _, slot := range []string{"blue", "green"} {
-		if err := os.RemoveAll(filepath.Dir(deployment(m.Config.Deployment.SocketRoot, id, slot).Socket)); err != nil {
+		socket := deployment(m.Config.Deployment.Socket, id, slot).Socket
+		if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
+		}
+		if removeDir {
+			var err error
+			if removeAll {
+				err = os.RemoveAll(filepath.Dir(socket))
+			} else {
+				err = os.Remove(filepath.Dir(socket))
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func deployment(root, id, slot string) model.Deploy {
+func deployment(socket, id, slot string) model.Deploy {
 	return model.Deploy{
-		Socket:    filepath.Join(root, id+"-"+slot, "http.sock"),
+		Socket:    strings.NewReplacer("{service_id}", id, "{slot}", slot).Replace(socket),
 		Container: "moddengine_" + id + "_" + slot,
 	}
 }

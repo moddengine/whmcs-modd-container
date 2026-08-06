@@ -24,5 +24,5 @@ arbitrary non-root user and must not require writes outside the configured
 service binds and socket directory.
 
 Caddy must import `/etc/caddy/services/*.caddy`, mount the controller's
-`caddy.service_config_dir` there, mount `deployment.socket_root` at the same
-path, and mount the suspension root read-only.
+`caddy.service_config_dir` there, mount the host socket tree referenced by
+`deployment.socket` at the same path, and mount the suspension root read-only.

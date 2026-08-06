@@ -18,3 +18,19 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
+func TestSocketTemplateValidation(t *testing.T) {
+	config, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for socket, valid := range map[string]bool{
+		"/run/moddengine/{service_id}-{slot}.sock":           true,
+		"/run/moddengine/{service_id}.sock":                  false,
+		"/run/moddengine/{service_id}-{slot}-{service}.sock": false,
+	} {
+		config.Deployment.Socket = socket
+		if err := config.Validate(); (err == nil) != valid {
+			t.Errorf("Validate() error for %q = %v, want valid %t", socket, err, valid)
+		}
+	}
+}

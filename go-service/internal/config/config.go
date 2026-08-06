@@ -64,7 +64,7 @@ type Deployment struct {
 	HealthInitialDelay time.Duration `toml:"-"`
 	HealthBackoff      time.Duration `toml:"-"`
 	TrafficDrain       time.Duration `toml:"-"`
-	SocketRoot         string        `toml:"socket_root"`
+	Socket             string        `toml:"socket"`
 	HealthInitialRaw   string        `toml:"health_initial_delay"`
 	HealthBackoffRaw   string        `toml:"health_backoff_increment"`
 	TrafficDrainRaw    string        `toml:"traffic_drain"`
@@ -119,11 +119,18 @@ func (c Config) Validate() error {
 	for name, path := range map[string]string{
 		"zfs.mount_prefix": c.ZFS.MountPrefix, "state.services_dir": c.State.ServicesDir,
 		"state.tombstones_dir": c.State.TombstonesDir, "caddy.service_config_dir": c.Caddy.ServiceConfigDir,
-		"deployment.socket_root": c.Deployment.SocketRoot, "logging.path": c.Logging.Path,
+		"deployment.socket": c.Deployment.Socket, "logging.path": c.Logging.Path,
 	} {
 		if !filepath.IsAbs(path) {
 			return fmt.Errorf("%s must be absolute", name)
 		}
+	}
+	unknown := strings.NewReplacer("{service_id}", "", "{slot}", "").Replace(c.Deployment.Socket)
+	if strings.ContainsAny(unknown, "{}") {
+		return errors.New("deployment.socket only supports {service_id} and {slot} placeholders")
+	}
+	if !strings.Contains(c.Deployment.Socket, "{service_id}") || !strings.Contains(c.Deployment.Socket, "{slot}") {
+		return errors.New("deployment.socket must contain {service_id} and {slot}")
 	}
 	if c.Docker.ImageRepository == "" || c.Docker.Network == "" {
 		return errors.New("docker image_repository and network are required")
