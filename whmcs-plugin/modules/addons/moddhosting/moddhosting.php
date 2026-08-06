@@ -215,20 +215,15 @@ function moddhosting_bulk_page(array $vars): void
         echo '</tbody></table>';
         return;
     }
-    $search = strtolower(trim((string) ($_GET['q'] ?? '')));
-    $services = array_filter($client->request('GET', '/v1/services')['services'] ?? [], static function (array $service) use ($search): bool {
-        $haystack = strtolower(($service['id'] ?? '') . ' ' . ($service['main_domain'] ?? '') . ' ' . ($service['staging_domain'] ?? ''));
-        return ($service['state'] ?? '') === 'active' && ($search === '' || str_contains($haystack, $search));
-    });
+    $services = array_filter($client->request('GET', '/v1/services')['services'] ?? [], static fn(array $service): bool => ($service['state'] ?? '') === 'active');
     $versions = $client->request('GET', '/v1/image/versions')['versions'] ?? [];
-    echo '<h2>Bulk upgrade</h2><form method="get" class="form-inline">'
-        . '<input type="hidden" name="module" value="moddhosting"><input type="hidden" name="page" value="bulk">'
-        . '<input class="form-control" name="q" placeholder="Domain or service ID" value="' . moddhosting_h($search) . '"> '
-        . '<button class="btn btn-default">Filter</button></form>'
+    echo '<h2>Bulk upgrade</h2><p class="form-inline">'
+        . '<input class="form-control" id="bulk-search" placeholder="Domain or service ID" aria-label="Filter hosts"></p>'
         . '<form method="post"><input type="hidden" name="token" value="' . moddhosting_h(generate_token('plain')) . '">'
-        . '<table class="table"><thead><tr><th>Service</th><th>Domains</th><th>Version</th></tr></thead><tbody>';
+        . '<table class="table" id="bulk-services"><thead><tr><th>Service</th><th>Domains</th><th>Version</th></tr></thead><tbody>';
     foreach ($services as $service) {
-        echo '<tr><td><label><input type="checkbox" name="services[]" value="' . moddhosting_h((string) $service['id']) . '"> '
+        $search = strtolower(($service['id'] ?? '') . ' ' . ($service['main_domain'] ?? '') . ' ' . ($service['staging_domain'] ?? ''));
+        echo '<tr data-search="' . moddhosting_h($search) . '"><td><label><input type="checkbox" name="services[]" value="' . moddhosting_h((string) $service['id']) . '"> '
             . moddhosting_h((string) $service['id']) . '</label></td>'
             . '<td>' . moddhosting_h((string) ($service['main_domain'] ?? '')) . '<br><small>' . moddhosting_h((string) ($service['staging_domain'] ?? '')) . '</small></td>'
             . '<td>' . moddhosting_h((string) $service['version']) . '</td></tr>';
@@ -238,7 +233,8 @@ function moddhosting_bulk_page(array $vars): void
         echo '<option value="' . moddhosting_h((string) $version['version']) . '">' . moddhosting_h((string) $version['version']) . '</option>';
     }
     echo '</select><label><input type="checkbox" name="confirm_downgrade"> Confirm possible downgrades</label><br>'
-        . '<button class="btn btn-primary">Run sequentially</button></form>';
+        . '<button class="btn btn-primary">Run sequentially</button></form>'
+        . '<script>document.getElementById("bulk-search").addEventListener("input",function(){var q=this.value.trim().toLowerCase();document.querySelectorAll("#bulk-services tbody tr").forEach(function(row){row.hidden=!row.dataset.search.includes(q);});});</script>';
 }
 
 function moddhosting_log_page(): void
