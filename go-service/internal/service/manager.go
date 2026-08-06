@@ -17,6 +17,7 @@ import (
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	dockeradapter "github.com/moddengine/whmcs-container-controller/internal/docker"
 	"github.com/moddengine/whmcs-container-controller/internal/healthcheck"
+	"github.com/moddengine/whmcs-container-controller/internal/isolation"
 	"github.com/moddengine/whmcs-container-controller/internal/metrics"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 	"github.com/moddengine/whmcs-container-controller/internal/notify"
@@ -172,6 +173,9 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	if err := m.createSkeleton(service); err != nil {
 		return fail(err)
 	}
+	if err := m.ensureIsolation(ctx, service); err != nil {
+		return fail(err)
+	}
 	if err := m.Docker.StartSlot(ctx, service, "blue"); err != nil {
 		return fail(err)
 	}
@@ -207,6 +211,9 @@ func (m *Manager) Resume(ctx context.Context, id, requestID string) (*model.Stat
 	}
 	if service.State != model.Suspended && service.State != model.Terminated {
 		return nil, conflict(fmt.Errorf("cannot resume service from %s", service.State))
+	}
+	if err := m.ensureIsolation(ctx, service); err != nil {
+		return nil, unprocessable("isolation_failed", err)
 	}
 	if err := m.Docker.StartSlot(ctx, service, service.LiveDeploy); err != nil {
 		return nil, unprocessable("resume_failed", err)
@@ -287,8 +294,21 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) error {
 	if err := m.Caddy.Remove(ctx, id); err != nil {
 		return unprocessable("caddy_failed", err)
 	}
+	if err := m.removeSocketDirs(id); err != nil {
+		return unprocessable("socket_cleanup_failed", err)
+	}
 	if err := m.ZFS.Destroy(ctx, id, service.Dataset.Name); err != nil {
 		return unprocessable("zfs_destroy_failed", err)
+	}
+	if err := os.Remove(service.Dataset.Mountpoint); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return unprocessable("mountpoint_cleanup_failed", err)
+	}
+	identity, err := isolation.ForService(id)
+	if err != nil {
+		return badRequest(err)
+	}
+	if err := isolation.RemoveAccount(ctx, identity); err != nil {
+		return unprocessable("account_cleanup_failed", err)
 	}
 	tombstone := model.Tombstone{
 		ID: id, State: model.Deleted, MainDomain: service.MainDomain, StagingDomain: service.StagingDomain,
@@ -330,6 +350,9 @@ func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeReque
 	cmp, ordered := compareVersions(req.Version, service.Version)
 	if (!ordered || cmp < 0) && !req.ConfirmDowngrade {
 		return nil, conflict(errors.New("possible downgrade requires confirm_downgrade=true"))
+	}
+	if err := m.ensureIsolation(ctx, service); err != nil {
+		return nil, unprocessable("isolation_failed", err)
 	}
 	configured, mode, socket, err := m.Caddy.Status(id)
 	if err != nil {
@@ -510,6 +533,38 @@ func (m *Manager) createSkeleton(service model.Service) error {
 				return err
 			}
 		} else if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) ensureIsolation(ctx context.Context, service model.Service) error {
+	identity, err := isolation.ForService(service.ID)
+	if err != nil {
+		return err
+	}
+	if err := isolation.EnsureAccount(ctx, identity, service.Dataset.Mountpoint); err != nil {
+		return err
+	}
+	if err := isolation.ChownTree(service.Dataset.Mountpoint, identity); err != nil {
+		return err
+	}
+	for _, slot := range []string{"blue", "green"} {
+		dir := filepath.Dir(service.Deploy[slot].Socket)
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return err
+		}
+		if err := isolation.ChownTree(dir, identity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) removeSocketDirs(id string) error {
+	for _, slot := range []string{"blue", "green"} {
+		if err := os.RemoveAll(filepath.Dir(deployment(m.Config.Deployment.SocketRoot, id, slot).Socket)); err != nil {
 			return err
 		}
 	}

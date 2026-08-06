@@ -57,16 +57,26 @@ func TestContainerSpec(t *testing.T) {
 	}
 	cfg := config.Docker{
 		Network: "udo-net", ImageRepository: "moddengine/moddengine", RestartPolicy: "always",
-		Binds: []string{"{mountpoint}/{slot}/cache:/cache"},
+		Binds:       []string{"{mountpoint}/{slot}/cache:/cache"},
+		Environment: []string{"SERVICE={service_id}", "DATA={mountpoint}", "DEPLOY={slot}"},
 	}
-	spec, host, networking := ContainerSpec(cfg, service, "blue")
+	spec, host, networking, err := ContainerSpec(cfg, service, "blue")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if spec.Image != "moddengine/moddengine:v21.6.24" ||
+		spec.User != "10123:10123" ||
 		spec.Labels[serviceLabel] != "whmcs-123" ||
 		spec.Labels[deployLabel] != "blue" {
 		t.Fatalf("unexpected container spec: %#v", spec)
 	}
 	if !slices.Contains(spec.Env, "ME_SITE=whmcs-123") {
 		t.Fatalf("ME_SITE must contain the service ID: %#v", spec.Env)
+	}
+	for _, expected := range []string{"SERVICE=whmcs-123", "DATA=/modd/sites/whmcs-123", "DEPLOY=blue"} {
+		if !slices.Contains(spec.Env, expected) {
+			t.Fatalf("environment placeholder was not expanded to %q: %#v", expected, spec.Env)
+		}
 	}
 	if !slices.Contains(host.Binds, "/modd/sites/whmcs-123/blue/cache:/cache") ||
 		!slices.Contains(host.Binds, "/run/moddengine/whmcs-123-blue:/run/moddengine/whmcs-123-blue") {

@@ -21,6 +21,18 @@ certificate trusted by the WHMCS host. Confirm the image's mounts against
 The example binds to `127.0.0.1`. For containerized Caddy, use host networking
 or bind the controller to a firewall-restricted address on Caddy's network.
 
+Run the release candidate lifecycle test against a disposable host with
+passwordless sudo:
+
+```sh
+./e2e/run-remote.sh moddadmin@192.168.252.10 /path/to/ssh-key ./controller
+```
+
+The test installs the candidate, builds a tiny scratch image, and verifies
+provisioning, host ownership, the container UID/GID, termination, and purge.
+Set `CONTROLLER_PATH`, `API_URL`, `TOKEN_PATH`, `SITE_ROOT`, `IMAGE_VERSION`,
+or `SERVICE_ID` when the test host differs from the playbook layout.
+
 Back up `/var/lib/modd-hosting/services` and
 `/var/lib/modd-hosting/tombstones`; site data follows the ZFS pool's normal
 snapshot and replication policy.

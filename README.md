@@ -60,13 +60,19 @@ deliberately disabled; termination and deletion are administrator actions in
 ## Requirements
 
 - Linux with Docker Engine and ZFS;
+- `useradd`, `groupadd`, `userdel`, and `groupdel` for per-service identities;
 - a Caddy container or trusted Caddy proxy;
 - the configured Docker network;
 - locally available ModdEngine images; and
 - WHMCS with PHP 8.1 or newer and cURL.
 
 The controller runs as root because it manages ZFS, Docker, Caddy files, and
-service storage. The supplied systemd unit restricts its writable paths.
+service identities and storage. Each `whmcs-<id>` service uses a matching host
+user and group with UID/GID `10000 + id`; its dataset, socket directories, and
+container process use that identity. Do not add systemd filesystem namespace
+options such as `ProtectSystem`, `ProtectHome`, or `PrivateTmp`:
+controller-created ZFS mounts and Unix socket directories must be visible to
+Docker and the host.
 
 ## Install the controller
 
@@ -187,9 +193,9 @@ Bind entries accept these placeholders:
 | `{service_id}` | Stable ID such as `whmcs-123`. |
 | `{slot}` | `blue` or `green`. |
 
-The controller also supplies `ME_SITE`, `ME_INSTANCE`, and the slot-specific
-socket bind automatically. The image must create `http.sock` in that socket
-directory. See
+The same placeholders expand in `docker.environment` entries. The controller
+also supplies `ME_SITE`, `ME_INSTANCE`, and the slot-specific socket bind
+automatically. The image must create `http.sock` in that socket directory. See
 [go-service/docs/container-runtime.md](go-service/docs/container-runtime.md)
 before changing mounts.
 

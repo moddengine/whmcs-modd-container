@@ -10,10 +10,8 @@ Restart=on-failure
 User=root
 Group=root
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/modd-hosting /var/log/modd-hosting /run/moddengine /modd/sites
+# Filesystem namespaces must remain disabled: ZFS mounts and Unix socket
+# directories created by the controller must be visible to Docker and the host.
 
 [Install]
 WantedBy=multi-user.target
-

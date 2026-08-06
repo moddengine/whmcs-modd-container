@@ -1,6 +1,12 @@
 package service
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/moddengine/whmcs-container-controller/internal/config"
+)
 
 func TestDomainAndVersionHelpers(t *testing.T) {
 	domain, err := NormalizeDomain("WWW.Example.COM.AU.")
@@ -32,5 +38,26 @@ func TestServiceID(t *testing.T) {
 		if ValidateServiceID(invalid) == nil {
 			t.Fatalf("accepted invalid service ID %q", invalid)
 		}
+	}
+}
+
+func TestRemoveSocketDirs(t *testing.T) {
+	root := t.TempDir()
+	manager := Manager{Config: config.Config{Deployment: config.Deployment{SocketRoot: root}}}
+	for _, slot := range []string{"blue", "green"} {
+		dir := filepath.Dir(deployment(root, "whmcs-123", slot).Socket)
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sibling := filepath.Join(root, "whmcs-123-other")
+	if err := os.Mkdir(sibling, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.removeSocketDirs("whmcs-123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatal("socket cleanup removed an unrelated directory")
 	}
 }

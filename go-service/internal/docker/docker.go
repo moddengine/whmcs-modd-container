@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
+	"github.com/moddengine/whmcs-container-controller/internal/isolation"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 )
 
@@ -76,24 +77,34 @@ func (a *Adapter) Containers(ctx context.Context, serviceID string) ([]model.Con
 }
 
 func (a *Adapter) Create(ctx context.Context, service model.Service, slot string) (string, error) {
-	spec, host, netConfig := ContainerSpec(a.cfg, service, slot)
+	spec, host, netConfig, err := ContainerSpec(a.cfg, service, slot)
+	if err != nil {
+		return "", err
+	}
 	response, err := a.client.ContainerCreate(ctx, spec, host, netConfig, nil, service.Deploy[slot].Container)
 	return response.ID, err
 }
 
-func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*container.Config, *container.HostConfig, *network.NetworkingConfig) {
+func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*container.Config, *container.HostConfig, *network.NetworkingConfig, error) {
+	identity, err := isolation.ForService(service.ID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	labels := map[string]string{
 		managedLabel: "true", serviceLabel: service.ID, versionLabel: service.Version,
 		appLabel: "moddengine", deployLabel: slot,
 	}
-	env := append([]string{}, cfg.Environment...)
-	env = append(env, "ME_SITE="+service.ID, "ME_INSTANCE="+service.ID+"-"+slot)
-	binds := make([]string, 0, len(cfg.Binds)+2)
 	replacer := strings.NewReplacer(
 		"{mountpoint}", service.Dataset.Mountpoint,
 		"{slot}", slot,
 		"{service_id}", service.ID,
 	)
+	env := make([]string, 0, len(cfg.Environment)+2)
+	for _, value := range cfg.Environment {
+		env = append(env, replacer.Replace(value))
+	}
+	env = append(env, "ME_SITE="+service.ID, "ME_INSTANCE="+service.ID+"-"+slot)
+	binds := make([]string, 0, len(cfg.Binds)+2)
 	for _, bind := range cfg.Binds {
 		binds = append(binds, replacer.Replace(bind))
 	}
@@ -101,13 +112,13 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 	binds = append(binds, socketDir+":"+socketDir)
 	return &container.Config{
 			Image: cfg.ImageRepository + ":" + service.Version,
-			Env:   env, Labels: labels,
+			User:  fmt.Sprintf("%d:%d", identity.UID, identity.GID), Env: env, Labels: labels,
 		}, &container.HostConfig{
 			Binds:         binds,
 			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyMode(cfg.RestartPolicy)},
 		}, &network.NetworkingConfig{
 			EndpointsConfig: map[string]*network.EndpointSettings{cfg.Network: {}},
-		}
+		}, nil
 }
 
 func (a *Adapter) Start(ctx context.Context, id string) error {
