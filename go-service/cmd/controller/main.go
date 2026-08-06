@@ -94,7 +94,7 @@ func main() {
 		Config: cfg, Repo: repo, Docker: docker,
 		ZFS: zfs.Adapter{Prefix: cfg.ZFS.DatasetPrefix, MountPrefix: cfg.ZFS.MountPrefix},
 		Caddy: caddy.Adapter{
-			Dir: cfg.Caddy.ServiceConfigDir, SuspensionRoot: cfg.Caddy.SuspensionRoot,
+			Dir: cfg.Caddy.ServiceConfigDir, SuspensionRoot: cfg.Caddy.SuspensionRoot, ActiveTemplate: cfg.Caddy.ActiveTemplate,
 			ValidateCommand: cfg.Caddy.ValidateCommand, ReloadCommand: cfg.Caddy.ReloadCommand,
 		},
 		Health: healthcheck.Checker{

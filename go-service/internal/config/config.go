@@ -47,6 +47,7 @@ type State struct {
 type Caddy struct {
 	ServiceConfigDir string   `toml:"service_config_dir"`
 	SuspensionRoot   string   `toml:"suspension_root"`
+	ActiveTemplate   string   `toml:"active_template"`
 	ValidateCommand  []string `toml:"validate_command"`
 	ReloadCommand    []string `toml:"reload_command"`
 }
@@ -132,6 +133,9 @@ func (c Config) Validate() error {
 	}
 	if c.Domains.StagingSuffix == "" {
 		return errors.New("domains.staging_suffix is required")
+	}
+	if c.Caddy.ActiveTemplate == "" {
+		return errors.New("caddy.active_template is required")
 	}
 	if c.Auth.BearerTokenFile == "" {
 		return errors.New("auth.bearer_token_file is required")

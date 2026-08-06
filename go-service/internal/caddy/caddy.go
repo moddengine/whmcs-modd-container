@@ -17,14 +17,31 @@ var socketPattern = regexp.MustCompile(`reverse_proxy unix/(/[^ \r\n}]+)`)
 type Adapter struct {
 	Dir             string
 	SuspensionRoot  string
+	ActiveTemplate  string
 	ValidateCommand []string
 	ReloadCommand   []string
 }
 
 func (a Adapter) Path(id string) string { return filepath.Join(a.Dir, id+".caddy") }
 
-func (a Adapter) Active(ctx context.Context, id string, domains []string, socket string) error {
-	return a.replace(ctx, id, fmt.Sprintf("%s {\n\treverse_proxy unix/%s\n}\n", strings.Join(domains, ", "), socket))
+func (a Adapter) Active(ctx context.Context, id string, domains []string, slot string) error {
+	var content strings.Builder
+	for _, domain := range domains {
+		content.WriteString(strings.NewReplacer(
+			"{domain}", domain,
+			"{service_id}", id,
+			"{slot}", slot,
+		).Replace(a.ActiveTemplate))
+	}
+	return a.replace(ctx, id, content.String())
+}
+
+func (a Adapter) Socket(id, slot string) string {
+	content := strings.NewReplacer("{service_id}", id, "{slot}", slot).Replace(a.ActiveTemplate)
+	if match := socketPattern.FindStringSubmatch(content); len(match) == 2 {
+		return match[1]
+	}
+	return ""
 }
 
 func (a Adapter) Suspended(ctx context.Context, id string, domains []string) error {

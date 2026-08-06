@@ -78,8 +78,7 @@ func TestContainerSpec(t *testing.T) {
 			t.Fatalf("environment placeholder was not expanded to %q: %#v", expected, spec.Env)
 		}
 	}
-	if !slices.Contains(host.Binds, "/modd/sites/whmcs-123/blue/cache:/cache") ||
-		!slices.Contains(host.Binds, "/run/moddengine/whmcs-123-blue:/run/moddengine/whmcs-123-blue") {
+	if !slices.Equal(host.Binds, []string{"/modd/sites/whmcs-123/blue/cache:/cache"}) {
 		t.Fatalf("unexpected binds: %#v", host.Binds)
 	}
 	if networking.EndpointsConfig["udo-net"] == nil {

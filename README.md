@@ -156,6 +156,7 @@ content follows the ZFS pool's snapshot and replication policy.
 | --- | --- |
 | `caddy.service_config_dir` | Host directory for generated service Caddyfiles. |
 | `caddy.suspension_root` | Directory containing the shared `index.html`. |
+| `caddy.active_template` | Active service Caddyfile template, repeated per domain; supports `{domain}`, `{service_id}`, and `{slot}`. |
 | `caddy.validate_command` | Argument array run after a service-file change. |
 | `caddy.reload_command` | Argument array run after successful validation. |
 

@@ -182,7 +182,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	if err := m.Health.Check(ctx, service.Deploy["blue"].Socket); err != nil {
 		return fail(err)
 	}
-	if err := m.Caddy.Active(ctx, id, []string{mainDomain, stagingDomain}, service.Deploy["blue"].Socket); err != nil {
+	if err := m.Caddy.Active(ctx, id, []string{mainDomain, stagingDomain}, "blue"); err != nil {
 		return fail(err)
 	}
 	service.LastError = ""
@@ -221,7 +221,7 @@ func (m *Manager) Resume(ctx context.Context, id, requestID string) (*model.Stat
 	if err := m.Health.Check(ctx, service.Deploy[service.LiveDeploy].Socket); err != nil {
 		return nil, unprocessable("health_check_failed", err)
 	}
-	if err := m.Caddy.Active(ctx, id, domains(service), service.Deploy[service.LiveDeploy].Socket); err != nil {
+	if err := m.Caddy.Active(ctx, id, domains(service), service.LiveDeploy); err != nil {
 		return nil, unprocessable("caddy_failed", err)
 	}
 	service.State, service.LastError, service.UpdatedAt = model.Active, "", time.Now().UTC()
@@ -358,8 +358,8 @@ func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeReque
 	if err != nil {
 		return nil, internal(err)
 	}
-	if !configured || mode != "proxy" || socket != service.Deploy[service.LiveDeploy].Socket {
-		if err := m.Caddy.Active(ctx, id, domains(service), service.Deploy[service.LiveDeploy].Socket); err != nil {
+	if !configured || mode != "proxy" || socket != m.Caddy.Socket(id, service.LiveDeploy) {
+		if err := m.Caddy.Active(ctx, id, domains(service), service.LiveDeploy); err != nil {
 			return nil, internal(fmt.Errorf("restore Caddy live deployment: %w", err))
 		}
 	}
@@ -378,7 +378,7 @@ func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeReque
 	if err := m.Health.Check(ctx, updated.Deploy[target].Socket); err != nil {
 		return nil, m.upgradeFailure(ctx, service, requestID, err)
 	}
-	if err := m.Caddy.Active(ctx, id, domains(updated), updated.Deploy[target].Socket); err != nil {
+	if err := m.Caddy.Active(ctx, id, domains(updated), target); err != nil {
 		return nil, m.upgradeFailure(ctx, service, requestID, err)
 	}
 	if err := wait(ctx, m.Config.Deployment.TrafficDrain); err != nil {
@@ -483,7 +483,7 @@ func (m *Manager) status(ctx context.Context, service model.Service) (*model.Sta
 	if running > 1 {
 		result.Warnings = append(result.Warnings, "more than one deployment is running")
 	}
-	if service.State == model.Active && result.Caddy.Socket != service.Deploy[service.LiveDeploy].Socket {
+	if service.State == model.Active && result.Caddy.Socket != m.Caddy.Socket(service.ID, service.LiveDeploy) {
 		result.Warnings = append(result.Warnings, "Caddy and TOML live deployment disagree")
 	}
 	if !result.DatasetExists {
