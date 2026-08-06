@@ -215,12 +215,23 @@ function moddhosting_bulk_page(array $vars): void
         echo '</tbody></table>';
         return;
     }
-    $services = array_filter($client->request('GET', '/v1/services')['services'] ?? [], static fn(array $service): bool => ($service['state'] ?? '') === 'active');
+    $search = strtolower(trim((string) ($_GET['q'] ?? '')));
+    $services = array_filter($client->request('GET', '/v1/services')['services'] ?? [], static function (array $service) use ($search): bool {
+        $haystack = strtolower(($service['id'] ?? '') . ' ' . ($service['main_domain'] ?? '') . ' ' . ($service['staging_domain'] ?? ''));
+        return ($service['state'] ?? '') === 'active' && ($search === '' || str_contains($haystack, $search));
+    });
     $versions = $client->request('GET', '/v1/image/versions')['versions'] ?? [];
-    echo '<h2>Bulk upgrade</h2><form method="post"><input type="hidden" name="token" value="' . moddhosting_h(generate_token('plain')) . '"><table class="table"><tbody>';
+    echo '<h2>Bulk upgrade</h2><form method="get" class="form-inline">'
+        . '<input type="hidden" name="module" value="moddhosting"><input type="hidden" name="page" value="bulk">'
+        . '<input class="form-control" name="q" placeholder="Domain or service ID" value="' . moddhosting_h($search) . '"> '
+        . '<button class="btn btn-default">Filter</button></form>'
+        . '<form method="post"><input type="hidden" name="token" value="' . moddhosting_h(generate_token('plain')) . '">'
+        . '<table class="table"><thead><tr><th>Service</th><th>Domains</th><th>Version</th></tr></thead><tbody>';
     foreach ($services as $service) {
         echo '<tr><td><label><input type="checkbox" name="services[]" value="' . moddhosting_h((string) $service['id']) . '"> '
-            . moddhosting_h((string) $service['id']) . '</label></td><td>' . moddhosting_h((string) $service['version']) . '</td></tr>';
+            . moddhosting_h((string) $service['id']) . '</label></td>'
+            . '<td>' . moddhosting_h((string) ($service['main_domain'] ?? '')) . '<br><small>' . moddhosting_h((string) ($service['staging_domain'] ?? '')) . '</small></td>'
+            . '<td>' . moddhosting_h((string) $service['version']) . '</td></tr>';
     }
     echo '</tbody></table><select name="version" class="form-control">';
     foreach ($versions as $version) {
@@ -266,7 +277,7 @@ function moddhosting_client_from_server(object $server): ApiClient
     if ($host === '') {
         throw new \RuntimeException('Controller hostname is missing.');
     }
-    return new ApiClient('https://' . $host . ':' . ((int) $server->port ?: 443), decrypt((string) $server->password));
+    return ApiClient::forController('https://' . $host . ':' . ((int) $server->port ?: 443), decrypt((string) $server->password));
 }
 
 function moddhosting_valid_id(string $id): string

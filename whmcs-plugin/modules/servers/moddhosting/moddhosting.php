@@ -173,7 +173,7 @@ function moddhosting_client(array $params): ApiClient
         throw new \InvalidArgumentException('Controller hostname is required');
     }
     $port = (int) ($params['serverport'] ?? 443);
-    return new ApiClient('https://' . $host . ':' . ($port ?: 443), (string) $params['serverpassword']);
+    return ApiClient::forController('https://' . $host . ':' . ($port ?: 443), (string) $params['serverpassword']);
 }
 
 /**

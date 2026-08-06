@@ -6,7 +6,12 @@ namespace ModdHosting;
 
 final class ApiClient
 {
-    public function __construct(
+    /** @var array<string, self> */
+    private static array $instances = [];
+
+    private readonly \CurlHandle $handle;
+
+    private function __construct(
         private readonly string $baseUrl,
         private readonly string $token,
         private readonly int $timeout = 125,
@@ -14,6 +19,18 @@ final class ApiClient
         if (!str_starts_with($baseUrl, 'https://')) {
             throw new \InvalidArgumentException('Controller URL must use HTTPS');
         }
+        $handle = curl_init();
+        if ($handle === false) {
+            throw new \RuntimeException('Unable to initialise cURL');
+        }
+        $this->handle = $handle;
+    }
+
+    public static function forController(string $baseUrl, string $token, int $timeout = 125): self
+    {
+        $baseUrl = rtrim($baseUrl, '/');
+        $key = hash('sha256', $baseUrl . "\0" . $token . "\0" . $timeout);
+        return self::$instances[$key] ??= new self($baseUrl, $token, $timeout);
     }
 
     /**
@@ -22,9 +39,10 @@ final class ApiClient
      */
     public function request(string $method, string $path, ?array $body = null): array
     {
-        $handle = curl_init(rtrim($this->baseUrl, '/') . $path);
+        curl_reset($this->handle);
         $headers = ['Accept: application/json', 'Authorization: Bearer ' . $this->token];
         $options = [
+            CURLOPT_URL => $this->baseUrl . $path,
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HTTPHEADER => $headers,
@@ -39,11 +57,10 @@ final class ApiClient
             $options[CURLOPT_HTTPHEADER] = $headers;
             $options[CURLOPT_POSTFIELDS] = $encoded;
         }
-        curl_setopt_array($handle, $options);
-        $response = curl_exec($handle);
-        $curlError = curl_error($handle);
-        $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-        curl_close($handle);
+        curl_setopt_array($this->handle, $options);
+        $response = curl_exec($this->handle);
+        $curlError = curl_error($this->handle);
+        $status = (int) curl_getinfo($this->handle, CURLINFO_RESPONSE_CODE);
 
         if ($response === false) {
             throw new ApiException('Controller connection failed: ' . $curlError);
