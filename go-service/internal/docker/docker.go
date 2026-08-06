@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -141,6 +143,17 @@ func (a *Adapter) Remove(ctx context.Context, id, serviceID string) error {
 }
 
 func (a *Adapter) StartSlot(ctx context.Context, service model.Service, slot string) error {
+	_, host, _, err := ContainerSpec(a.cfg, service, slot)
+	if err != nil {
+		return err
+	}
+	identity, err := isolation.ForService(service.ID)
+	if err != nil {
+		return err
+	}
+	if err := prepareBindSources(host.Binds, identity); err != nil {
+		return err
+	}
 	items, err := a.Containers(ctx, service.ID)
 	if err != nil {
 		return err
@@ -158,6 +171,26 @@ func (a *Adapter) StartSlot(ctx context.Context, service model.Service, slot str
 		return err
 	}
 	return a.Start(ctx, id)
+}
+
+func prepareBindSources(binds []string, identity isolation.Identity) error {
+	for _, bind := range binds {
+		source, target, ok := strings.Cut(bind, ":")
+		if !ok || !filepath.IsAbs(source) {
+			return fmt.Errorf("invalid bind %q", bind)
+		}
+		if err := os.MkdirAll(source, 0750); err != nil {
+			return fmt.Errorf("create bind source %q: %w", source, err)
+		}
+		_, options, _ := strings.Cut(target, ":")
+		if strings.Contains(","+options+",", ",ro,") {
+			continue
+		}
+		if err := isolation.ChownTree(source, identity); err != nil {
+			return fmt.Errorf("chown bind source %q: %w", source, err)
+		}
+	}
+	return nil
 }
 
 func (a *Adapter) StopAll(ctx context.Context, serviceID string) error {

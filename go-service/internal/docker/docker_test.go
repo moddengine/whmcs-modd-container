@@ -4,13 +4,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/client"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
+	"github.com/moddengine/whmcs-container-controller/internal/isolation"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 )
 
@@ -83,5 +87,40 @@ func TestContainerSpec(t *testing.T) {
 	}
 	if networking.EndpointsConfig["udo-net"] == nil {
 		t.Fatal("configured network missing")
+	}
+}
+
+func TestPrepareBindSourcesCreatesAndOwnsSources(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "missing", "bind")
+	identity := isolation.Identity{UID: os.Getuid(), GID: os.Getgid()}
+	if err := prepareBindSources([]string{source + ":/srv/modd/cache"}, identity); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("bind source was not created as a directory: %v", err)
+	}
+}
+
+func TestPrepareBindSourcesDoesNotChownReadOnlySources(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "readonly")
+	if err := os.Mkdir(source, 0750); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := isolation.Identity{UID: os.Getuid() + 1, GID: os.Getgid() + 1}
+	if err := prepareBindSources([]string{source + ":/srv/modd/secrets:ro,z"}, identity); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Sys().(*syscall.Stat_t).Uid != after.Sys().(*syscall.Stat_t).Uid ||
+		before.Sys().(*syscall.Stat_t).Gid != after.Sys().(*syscall.Stat_t).Gid {
+		t.Fatal("read-only bind source ownership changed")
 	}
 }
