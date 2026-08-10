@@ -87,8 +87,6 @@ func DeriveStaging(domain, suffix string) (string, error) {
 }
 
 func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionRequest, requestID string) (*model.Status, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err := ValidateServiceID(id); err != nil {
 		return nil, false, badRequest(err)
 	}
@@ -113,20 +111,6 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	} else if !errors.Is(err, state.ErrNotFound) {
 		return nil, false, internal(err)
 	}
-	var retry *model.Service
-	if existing, err := m.Repo.Get(id); err == nil {
-		if existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.Version == req.Version {
-			if existing.LastError == "" {
-				status, statusErr := m.status(ctx, existing)
-				return status, false, statusErr
-			}
-			retry = &existing
-		} else {
-			return nil, false, conflict(errors.New("service already exists with different provisioning data"))
-		}
-	} else if !errors.Is(err, state.ErrNotFound) {
-		return nil, false, internal(err)
-	}
 	ok, err := m.Docker.HasVersion(ctx, req.Version)
 	if err != nil {
 		return nil, false, unavailable(err)
@@ -134,32 +118,66 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	if !ok {
 		return nil, false, notFound(errors.New("image version is not locally available"))
 	}
+	m.mu.Lock()
+	var retry *model.Service
+	if existing, err := m.Repo.Get(id); err == nil {
+		if existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.Version == req.Version {
+			derive(&existing)
+			if existing.Phase == "running" {
+				m.mu.Unlock()
+				status, statusErr := m.status(ctx, existing)
+				return status, false, statusErr
+			}
+			if busy(existing.Phase) {
+				m.mu.Unlock()
+				return nil, false, conflict(fmt.Errorf("%s is already in progress", existing.Operation))
+			}
+			if existing.Phase == "failed" && existing.Operation != "provision" {
+				m.mu.Unlock()
+				return nil, false, conflict(errors.New("service already exists; retry its failed lifecycle operation"))
+			}
+			retry = &existing
+		} else {
+			m.mu.Unlock()
+			return nil, false, conflict(errors.New("service already exists with different provisioning data"))
+		}
+	} else if !errors.Is(err, state.ErrNotFound) {
+		m.mu.Unlock()
+		return nil, false, internal(err)
+	}
 
 	var service model.Service
 	if retry != nil {
 		service = *retry
+		service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion = "provisioning", "provision", "blue", req.Version
 	} else {
 		now := time.Now().UTC()
 		service = model.Service{
 			ID: id, State: model.Active, MainDomain: mainDomain, StagingDomain: stagingDomain,
-			DisplayName: req.DisplayName, Version: req.Version, LiveDeploy: "blue",
+			DisplayName: req.DisplayName, Version: req.Version, LiveDeploy: "blue", Phase: "provisioning", Operation: "provision", TargetDeploy: "blue", TargetVersion: req.Version,
 			CreatedAt: now, UpdatedAt: now,
 			Dataset: model.DatasetRecord{Name: m.ZFS.Dataset(id), Mountpoint: m.ZFS.Mountpoint(id)},
 			Paths:   model.PathRecord{Caddyfile: m.Caddy.Path(id)},
 			Deploy: map[string]model.Deploy{
-				"blue":  deployment(m.Config.Deployment.Socket, id, "blue"),
-				"green": deployment(m.Config.Deployment.Socket, id, "green"),
+				"blue":  deployment(m.Config.Deployment.Socket, id, "blue", req.Version),
+				"green": deployment(m.Config.Deployment.Socket, id, "green", ""),
 			},
 		}
 		if err := m.Repo.Put(service); err != nil {
+			m.mu.Unlock()
 			return nil, false, internal(err)
 		}
 	}
+	if retry != nil {
+		service.LastError, service.UpdatedAt = "", time.Now().UTC()
+		if err := m.Repo.Put(service); err != nil {
+			m.mu.Unlock()
+			return nil, false, internal(err)
+		}
+	}
+	m.mu.Unlock()
 	fail := func(operationErr error) (*model.Status, bool, error) {
-		service.LastError = operationErr.Error()
-		service.UpdatedAt = time.Now().UTC()
-		_ = m.Repo.Put(service)
-		m.sendNotification(ctx, "provision", false, service, requestID, operationErr.Error())
+		m.failSync(service, requestID, operationErr)
 		return nil, false, unprocessable("provision_failed", operationErr)
 	}
 	exists, err := m.ZFS.Exists(ctx, id)
@@ -180,231 +198,508 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	if err := m.Docker.StartSlot(ctx, service, "blue"); err != nil {
 		return fail(err)
 	}
-	if err := m.Health.Check(ctx, service.Deploy["blue"].Socket); err != nil {
-		return fail(err)
-	}
-	if err := m.Caddy.Active(ctx, id, []string{mainDomain, stagingDomain}, "blue"); err != nil {
-		return fail(err)
-	}
-	service.LastError = ""
+	service.Phase, service.Deploy["blue"] = "waiting_for_health", withHealth(service.Deploy["blue"], "checking")
 	service.UpdatedAt = time.Now().UTC()
+	m.mu.Lock()
 	if err := m.Repo.Put(service); err != nil {
+		m.mu.Unlock()
 		return fail(err)
 	}
-	m.sendNotification(ctx, "provision", true, service, requestID, "")
+	m.mu.Unlock()
+	go m.finishHealth(id, "provision", requestID)
 	status, err := m.status(ctx, service)
-	return status, retry == nil, err
+	return status, true, err
 }
 
-func (m *Manager) Suspend(ctx context.Context, id, requestID string) (*model.Status, error) {
+func (m *Manager) Suspend(ctx context.Context, id, requestID string) (*model.Status, bool, error) {
 	return m.changeState(ctx, id, requestID, model.Suspended)
 }
 
-func (m *Manager) Resume(ctx context.Context, id, requestID string) (*model.Status, error) {
+func (m *Manager) Resume(ctx context.Context, id, requestID string) (*model.Status, bool, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	service, err := m.liveService(id)
 	if err != nil {
-		return nil, err
+		m.mu.Unlock()
+		return nil, false, err
 	}
-	if service.State == model.Active {
-		return m.status(ctx, service)
+	derive(&service)
+	if service.State == model.Active && service.Phase == "running" {
+		m.mu.Unlock()
+		status, err := m.status(ctx, service)
+		return status, false, err
 	}
 	if service.State != model.Suspended && service.State != model.Terminated {
-		return nil, conflict(fmt.Errorf("cannot resume service from %s", service.State))
+		m.mu.Unlock()
+		return nil, false, conflict(fmt.Errorf("cannot resume service from %s", service.State))
 	}
+	if busy(service.Phase) {
+		m.mu.Unlock()
+		return nil, false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
+	}
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion = "starting", "resume", service.LiveDeploy, service.Version
+	service.UpdatedAt = time.Now().UTC()
+	if err := m.Repo.Put(service); err != nil {
+		m.mu.Unlock()
+		return nil, false, internal(err)
+	}
+	m.mu.Unlock()
 	if err := m.ensureIsolation(ctx, service); err != nil {
-		return nil, unprocessable("isolation_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("isolation_failed", err)
 	}
 	if err := m.Docker.StartSlot(ctx, service, service.LiveDeploy); err != nil {
-		return nil, unprocessable("resume_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("resume_failed", err)
 	}
-	if err := m.Health.Check(ctx, service.Deploy[service.LiveDeploy].Socket); err != nil {
-		return nil, unprocessable("health_check_failed", err)
+	service.State, service.Phase, service.UpdatedAt = model.Active, "waiting_for_health", time.Now().UTC()
+	service.Deploy[service.LiveDeploy] = withHealth(service.Deploy[service.LiveDeploy], "checking")
+	m.mu.Lock()
+	err = m.Repo.Put(service)
+	m.mu.Unlock()
+	if err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, internal(err)
 	}
-	if err := m.Caddy.Active(ctx, id, domains(service), service.LiveDeploy); err != nil {
-		return nil, unprocessable("caddy_failed", err)
-	}
-	service.State, service.LastError, service.UpdatedAt = model.Active, "", time.Now().UTC()
-	if err := m.Repo.Put(service); err != nil {
-		return nil, internal(err)
-	}
-	m.sendNotification(ctx, "resume", true, service, requestID, "")
-	return m.status(ctx, service)
+	go m.finishHealth(id, "resume", requestID)
+	status, err := m.status(ctx, service)
+	return status, true, err
 }
 
-func (m *Manager) Terminate(ctx context.Context, id, requestID string) (*model.Status, error) {
+func (m *Manager) Terminate(ctx context.Context, id, requestID string) (*model.Status, bool, error) {
 	return m.changeState(ctx, id, requestID, model.Terminated)
 }
 
-func (m *Manager) changeState(ctx context.Context, id, requestID, target string) (*model.Status, error) {
+func (m *Manager) changeState(ctx context.Context, id, requestID, target string) (*model.Status, bool, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	service, err := m.liveService(id)
 	if err != nil {
-		return nil, err
+		m.mu.Unlock()
+		return nil, false, err
+	}
+	derive(&service)
+	if service.State == target && service.Phase == "stopped" {
+		m.mu.Unlock()
+		status, err := m.status(ctx, service)
+		return status, false, err
+	}
+	if busy(service.Phase) {
+		m.mu.Unlock()
+		return nil, false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
 	}
 	switch target {
 	case model.Suspended:
 		if service.State != model.Active && service.State != model.Suspended {
-			return nil, conflict(fmt.Errorf("cannot suspend service from %s", service.State))
-		}
-		if err := m.Docker.StopAll(ctx, id); err != nil {
-			return nil, unprocessable("suspend_failed", err)
-		}
-		if err := m.Caddy.Suspended(ctx, id, domains(service)); err != nil {
-			return nil, unprocessable("caddy_failed", err)
+			m.mu.Unlock()
+			return nil, false, conflict(fmt.Errorf("cannot suspend service from %s", service.State))
 		}
 	case model.Terminated:
 		if service.State != model.Active && service.State != model.Suspended && service.State != model.Terminated {
-			return nil, conflict(fmt.Errorf("cannot terminate service from %s", service.State))
-		}
-		if err := m.Docker.RemoveAll(ctx, id); err != nil {
-			return nil, unprocessable("terminate_failed", err)
-		}
-		if err := m.Caddy.Remove(ctx, id); err != nil {
-			return nil, unprocessable("caddy_failed", err)
+			m.mu.Unlock()
+			return nil, false, conflict(fmt.Errorf("cannot terminate service from %s", service.State))
 		}
 	}
-	service.State, service.LastError, service.UpdatedAt = target, "", time.Now().UTC()
+	service.Phase, service.Operation, service.UpdatedAt = "stopping", target, time.Now().UTC()
 	if err := m.Repo.Put(service); err != nil {
-		return nil, internal(err)
+		m.mu.Unlock()
+		return nil, false, internal(err)
 	}
-	m.sendNotification(ctx, target, true, service, requestID, "")
-	return m.status(ctx, service)
+	m.mu.Unlock()
+	if target == model.Suspended {
+		err = m.Docker.StopAll(ctx, id)
+	} else {
+		err = m.Docker.RemoveAll(ctx, id)
+	}
+	if err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable(target+"_failed", err)
+	}
+	service.State, service.Phase, service.LastError, service.UpdatedAt = target, "routing", "", time.Now().UTC()
+	m.mu.Lock()
+	err = m.Repo.Put(service)
+	m.mu.Unlock()
+	if err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, internal(err)
+	}
+	go m.finishRouting(id, target, requestID)
+	status, err := m.status(ctx, service)
+	return status, true, err
 }
 
-func (m *Manager) Delete(ctx context.Context, id, requestID string) error {
+func (m *Manager) Delete(ctx context.Context, id, requestID string) (*model.Tombstone, bool, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if tombstone, err := m.Repo.GetTombstone(id); err == nil && tombstone.State == model.Deleted {
-		return m.Repo.DeleteLive(id)
+	if tombstone, err := m.Repo.GetTombstone(id); err == nil {
+		if tombstone.Phase == "" || tombstone.Phase == "deleted" {
+			m.mu.Unlock()
+			return &tombstone, false, m.Repo.DeleteLive(id)
+		}
+		if busy(tombstone.Phase) {
+			m.mu.Unlock()
+			return nil, false, conflict(errors.New("delete is already in progress"))
+		}
+		tombstone.Phase, tombstone.Operation, tombstone.LastError, tombstone.UpdatedAt = "deleting", "delete", "", time.Now().UTC()
+		if err := m.Repo.PutTombstone(tombstone); err != nil {
+			m.mu.Unlock()
+			return nil, false, internal(err)
+		}
+		m.mu.Unlock()
+		service := model.Service{ID: id, State: model.Deleted, MainDomain: tombstone.MainDomain, StagingDomain: tombstone.StagingDomain, Version: tombstone.LastVersion}
+		go m.finishDelete(tombstone, service, requestID)
+		return &tombstone, true, nil
 	} else if err != nil && !errors.Is(err, state.ErrNotFound) {
-		return internal(err)
+		m.mu.Unlock()
+		return nil, false, internal(err)
 	}
 	service, err := m.liveService(id)
 	if err != nil {
-		return err
+		m.mu.Unlock()
+		return nil, false, err
 	}
+	derive(&service)
 	if service.State != model.Terminated {
-		return conflict(errors.New("service must be terminated before deletion"))
+		m.mu.Unlock()
+		return nil, false, conflict(errors.New("service must be terminated before deletion"))
 	}
+	if busy(service.Phase) {
+		m.mu.Unlock()
+		return nil, false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
+	}
+	service.Phase, service.Operation, service.UpdatedAt = "deleting", "delete", time.Now().UTC()
+	if err := m.Repo.Put(service); err != nil {
+		m.mu.Unlock()
+		return nil, false, internal(err)
+	}
+	m.mu.Unlock()
 	if err := m.Docker.RemoveAll(ctx, id); err != nil {
-		return unprocessable("delete_failed", err)
-	}
-	if err := m.Caddy.Remove(ctx, id); err != nil {
-		return unprocessable("caddy_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("delete_failed", err)
 	}
 	if err := m.removeSocketDirs(id); err != nil {
-		return unprocessable("socket_cleanup_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("socket_cleanup_failed", err)
 	}
 	if err := m.ZFS.Destroy(ctx, id, service.Dataset.Name); err != nil {
-		return unprocessable("zfs_destroy_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("zfs_destroy_failed", err)
 	}
 	if err := os.Remove(service.Dataset.Mountpoint); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return unprocessable("mountpoint_cleanup_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("mountpoint_cleanup_failed", err)
 	}
 	identity, err := isolation.ForService(id)
 	if err != nil {
-		return badRequest(err)
+		return nil, false, badRequest(err)
 	}
 	if err := isolation.RemoveAccount(ctx, identity); err != nil {
-		return unprocessable("account_cleanup_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("account_cleanup_failed", err)
 	}
 	tombstone := model.Tombstone{
 		ID: id, State: model.Deleted, MainDomain: service.MainDomain, StagingDomain: service.StagingDomain,
-		LastVersion: service.Version, DeletedAt: time.Now().UTC(), FormerDataset: service.Dataset.Name,
+		LastVersion: service.Version, DeletedAt: time.Now().UTC(), FormerDataset: service.Dataset.Name, Phase: "deleting", Operation: "delete", UpdatedAt: time.Now().UTC(),
 	}
+	m.mu.Lock()
 	if err := m.Repo.PutTombstone(tombstone); err != nil {
-		return internal(err)
+		m.mu.Unlock()
+		return nil, false, internal(err)
 	}
 	if err := m.Repo.DeleteLive(id); err != nil {
-		return internal(err)
+		m.mu.Unlock()
+		return nil, false, internal(err)
 	}
-	m.sendNotification(ctx, "delete", true, service, requestID, "")
-	return nil
+	m.mu.Unlock()
+	go m.finishDelete(tombstone, service, requestID)
+	return &tombstone, true, nil
 }
 
-func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID string) (*model.Status, error) {
+func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID string) (*model.Status, bool, error) {
+	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
+		return nil, false, badRequest(err)
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	service, err := m.liveService(id)
 	if err != nil {
-		return nil, err
+		m.mu.Unlock()
+		return nil, false, err
 	}
-	if service.State != model.Active {
-		return nil, conflict(errors.New("only active services can be upgraded"))
+	derive(&service)
+	done, validationErr := validateUpgrade(service, req)
+	m.mu.Unlock()
+	if validationErr != nil {
+		return nil, false, validationErr
 	}
-	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
-		return nil, badRequest(err)
-	}
-	if req.Version == service.Version {
-		return m.status(ctx, service)
+	if done {
+		status, err := m.status(ctx, service)
+		return status, false, err
 	}
 	available, err := m.Docker.HasVersion(ctx, req.Version)
 	if err != nil {
-		return nil, unavailable(err)
+		return nil, false, unavailable(err)
 	}
 	if !available {
-		return nil, notFound(errors.New("image version is not locally available"))
+		return nil, false, notFound(errors.New("image version is not locally available"))
 	}
-	cmp, ordered := compareVersions(req.Version, service.Version)
-	if (!ordered || cmp < 0) && !req.ConfirmDowngrade {
-		return nil, conflict(errors.New("possible downgrade requires confirm_downgrade=true"))
+	m.mu.Lock()
+	service, err = m.liveService(id)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, false, err
 	}
+	derive(&service)
+	done, validationErr = validateUpgrade(service, req)
+	if validationErr != nil {
+		m.mu.Unlock()
+		return nil, false, validationErr
+	}
+	if done {
+		m.mu.Unlock()
+		status, err := m.status(ctx, service)
+		return status, false, err
+	}
+	target := opposite(service.LiveDeploy)
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.UpdatedAt = "starting", "upgrade", target, req.Version, time.Now().UTC()
+	service.Deploy[target] = deployment(m.Config.Deployment.Socket, id, target, req.Version)
+	if err := m.Repo.Put(service); err != nil {
+		m.mu.Unlock()
+		return nil, false, internal(err)
+	}
+	m.mu.Unlock()
 	if err := m.ensureIsolation(ctx, service); err != nil {
-		return nil, unprocessable("isolation_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("isolation_failed", err)
 	}
 	configured, mode, socket, err := m.Caddy.Status(id)
 	if err != nil {
-		return nil, internal(err)
+		m.failSync(service, requestID, err)
+		return nil, false, internal(err)
 	}
 	if !configured || mode != "proxy" || socket != m.Caddy.Socket(id, service.LiveDeploy) {
 		if err := m.Caddy.Active(ctx, id, domains(service), service.LiveDeploy); err != nil {
-			return nil, internal(fmt.Errorf("restore Caddy live deployment: %w", err))
+			m.failSync(service, requestID, err)
+			return nil, false, internal(fmt.Errorf("restore Caddy live deployment: %w", err))
 		}
 	}
-	target := opposite(service.LiveDeploy)
 	updated := service
 	updated.Version = req.Version
 	if err := m.Docker.RemoveSlot(ctx, id, target); err != nil {
-		return nil, m.upgradeFailure(ctx, service, requestID, err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("upgrade_failed", err)
 	}
 	if err := os.Remove(updated.Deploy[target].Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, unprocessable("stale_socket_remove_failed", err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("stale_socket_remove_failed", err)
 	}
 	if err := m.Docker.StartSlot(ctx, updated, target); err != nil {
-		return nil, m.upgradeFailure(ctx, service, requestID, err)
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("upgrade_failed", err)
 	}
-	if err := m.Health.Check(ctx, updated.Deploy[target].Socket); err != nil {
-		return nil, m.upgradeFailure(ctx, service, requestID, err)
+	service.Phase, service.UpdatedAt = "waiting_for_health", time.Now().UTC()
+	service.Deploy[target] = withHealth(service.Deploy[target], "checking")
+	m.mu.Lock()
+	err = m.Repo.Put(service)
+	m.mu.Unlock()
+	if err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, internal(err)
 	}
-	if err := m.Caddy.Active(ctx, id, domains(updated), target); err != nil {
-		return nil, m.upgradeFailure(ctx, service, requestID, err)
-	}
-	if err := cleanupOldDeploy(ctx, m.Config.Deployment.TrafficDrain, func(cleanupCtx context.Context) error {
-		return m.Docker.RemoveSlot(cleanupCtx, id, service.LiveDeploy)
-	}); err != nil {
-		return nil, m.upgradeFailure(ctx, service, requestID, err)
-	}
-	updated.LiveDeploy, updated.LastError, updated.UpdatedAt = target, "", time.Now().UTC()
-	if err := m.Repo.Put(updated); err != nil {
-		return nil, internal(err)
-	}
-	return m.status(ctx, updated)
+	go m.finishHealth(id, "upgrade", requestID)
+	status, err := m.status(ctx, service)
+	return status, true, err
 }
 
-func (m *Manager) upgradeFailure(ctx context.Context, service model.Service, requestID string, err error) error {
-	service.LastError, service.UpdatedAt = err.Error(), time.Now().UTC()
-	_ = m.Repo.Put(service)
-	m.sendNotification(ctx, "upgrade", false, service, requestID, err.Error())
-	return unprocessable("upgrade_failed", err)
+func validateUpgrade(service model.Service, req model.UpgradeRequest) (bool, error) {
+	if service.State != model.Active {
+		return false, conflict(errors.New("only active services can be upgraded"))
+	}
+	if service.Phase == "failed" && service.Operation != "upgrade" {
+		return false, conflict(errors.New("retry the failed lifecycle operation before upgrading"))
+	}
+	if busy(service.Phase) {
+		return false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
+	}
+	if req.Version == service.Version {
+		return true, nil
+	}
+	cmp, ordered := compareVersions(req.Version, service.Version)
+	if (!ordered || cmp < 0) && !req.ConfirmDowngrade {
+		return false, conflict(errors.New("possible downgrade requires confirm_downgrade=true"))
+	}
+	return false, nil
 }
 
-func (m *Manager) sendNotification(ctx context.Context, operation string, success bool, service model.Service, requestID, detail string) {
-	if err := m.Notify.Send(ctx, operation, success, service, requestID, detail); err != nil && m.Logger != nil {
-		m.Logger.Warn("notification failed", "operation", operation, "service_id", service.ID, "request_id", requestID, "error", err)
+func (m *Manager) finishHealth(id, operation, requestID string) {
+	service, ok := m.deferredService(id, operation)
+	if !ok {
+		return
 	}
+	target := service.TargetDeploy
+	if err := m.Health.Check(context.Background(), service.Deploy[target].Socket); err != nil {
+		service.Deploy[target] = withHealth(service.Deploy[target], "unhealthy")
+		m.failDeferred(service, requestID, err)
+		return
+	}
+	service.Deploy[target] = withHealth(service.Deploy[target], "healthy")
+	service.Phase, service.UpdatedAt = "routing", time.Now().UTC()
+	m.putDeferred(service)
+	if err := m.Caddy.Active(context.Background(), id, domains(service), target); err != nil {
+		m.failDeferred(service, requestID, err)
+		return
+	}
+	if operation == "upgrade" {
+		service.Phase, service.UpdatedAt = "draining", time.Now().UTC()
+		m.putDeferred(service)
+		if err := cleanupOldDeploy(context.Background(), m.Config.Deployment.TrafficDrain, func(ctx context.Context) error {
+			return m.Docker.RemoveSlot(ctx, id, service.LiveDeploy)
+		}); err != nil {
+			m.failDeferred(service, requestID, err)
+			return
+		}
+		service.LiveDeploy, service.Version = target, service.TargetVersion
+	}
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.LastError, service.UpdatedAt = "running", "", "", "", "", time.Now().UTC()
+	m.putDeferred(service)
+	m.notifyAsync(operation, true, service, requestID, "")
+}
+
+func (m *Manager) finishRouting(id, operation, requestID string) {
+	service, ok := m.deferredService(id, operation)
+	if !ok {
+		return
+	}
+	var err error
+	if operation == model.Suspended {
+		err = m.Caddy.Suspended(context.Background(), id, domains(service))
+	} else {
+		err = m.Caddy.Remove(context.Background(), id)
+	}
+	if err != nil {
+		m.failDeferred(service, requestID, err)
+		return
+	}
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.LastError, service.UpdatedAt = "stopped", "", "", "", "", time.Now().UTC()
+	for slot, deploy := range service.Deploy {
+		service.Deploy[slot] = withHealth(deploy, "unknown")
+	}
+	m.putDeferred(service)
+	m.notifyAsync(operation, true, service, requestID, "")
+}
+
+func (m *Manager) finishDelete(tombstone model.Tombstone, service model.Service, requestID string) {
+	if err := m.Caddy.Remove(context.Background(), tombstone.ID); err != nil {
+		tombstone.Phase, tombstone.LastError, tombstone.UpdatedAt = "failed", err.Error(), time.Now().UTC()
+		m.mu.Lock()
+		_ = m.Repo.PutTombstone(tombstone)
+		m.mu.Unlock()
+		m.notifyAsync("delete", false, service, requestID, err.Error())
+		return
+	}
+	tombstone.Phase, tombstone.Operation, tombstone.LastError, tombstone.UpdatedAt = "deleted", "", "", time.Now().UTC()
+	m.mu.Lock()
+	_ = m.Repo.PutTombstone(tombstone)
+	m.mu.Unlock()
+	m.notifyAsync("delete", true, service, requestID, "")
+}
+
+func (m *Manager) deferredService(id, operation string) (model.Service, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	service, err := m.Repo.Get(id)
+	return service, err == nil && service.Operation == operation && busy(service.Phase)
+}
+
+func (m *Manager) putDeferred(service model.Service) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.Repo.Put(service); err != nil && m.Logger != nil {
+		m.Logger.Error("persist deferred state", "service_id", service.ID, "error", err)
+	}
+}
+
+func (m *Manager) failSync(service model.Service, requestID string, operationErr error) {
+	service.Phase, service.LastError, service.UpdatedAt = "failed", operationErr.Error(), time.Now().UTC()
+	m.putDeferred(service)
+	m.notifyAsync(service.Operation, false, service, requestID, operationErr.Error())
+}
+
+func (m *Manager) failDeferred(service model.Service, requestID string, operationErr error) {
+	m.failSync(service, requestID, operationErr)
+}
+
+func (m *Manager) notifyAsync(operation string, success bool, service model.Service, requestID, detail string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := m.Notify.Send(ctx, operation, success, service, requestID, detail); err != nil && m.Logger != nil {
+			m.Logger.Warn("notification failed", "operation", operation, "service_id", service.ID, "request_id", requestID, "error", err)
+		}
+	}()
+}
+
+func (m *Manager) RecoverInterrupted() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	services, err := m.Repo.List()
+	if err != nil {
+		return err
+	}
+	for _, service := range services {
+		derive(&service)
+		if busy(service.Phase) {
+			service.Phase, service.LastError, service.UpdatedAt = "failed", "controller restarted during deferred operation", time.Now().UTC()
+			if err := m.Repo.Put(service); err != nil {
+				return err
+			}
+		}
+	}
+	tombstones, err := m.Repo.ListTombstones()
+	if err != nil {
+		return err
+	}
+	for _, tombstone := range tombstones {
+		if tombstone.Phase == "deleting" {
+			tombstone.Phase, tombstone.LastError, tombstone.UpdatedAt = "failed", "controller restarted during deferred operation", time.Now().UTC()
+			if err := m.Repo.PutTombstone(tombstone); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func derive(service *model.Service) {
+	if service.Phase == "" {
+		if service.State == model.Active {
+			service.Phase = "running"
+		} else {
+			service.Phase = "stopped"
+		}
+	}
+	if service.Deploy == nil {
+		service.Deploy = map[string]model.Deploy{}
+	}
+	for slot, deploy := range service.Deploy {
+		if deploy.Health == "" {
+			deploy.Health = "unknown"
+		}
+		if deploy.Version == "" && slot == service.LiveDeploy {
+			deploy.Version = service.Version
+		}
+		service.Deploy[slot] = deploy
+	}
+}
+
+func busy(phase string) bool {
+	switch phase {
+	case "provisioning", "starting", "waiting_for_health", "routing", "draining", "stopping", "deleting":
+		return true
+	default:
+		return false
+	}
+}
+
+func withHealth(deploy model.Deploy, health string) model.Deploy {
+	deploy.Health = health
+	return deploy
 }
 
 func (m *Manager) Get(ctx context.Context, id string) (*model.Status, error) {
@@ -415,7 +710,67 @@ func (m *Manager) Get(ctx context.Context, id string) (*model.Status, error) {
 	if err != nil {
 		return nil, err
 	}
+	derive(&service)
 	return m.status(ctx, service)
+}
+
+func (m *Manager) MonitorSnapshot(ctx context.Context, id string) (model.MonitorSnapshot, bool, error) {
+	if err := ValidateServiceID(id); err != nil {
+		return model.MonitorSnapshot{}, false, badRequest(err)
+	}
+	service, err := m.Repo.Get(id)
+	if err == nil {
+		derive(&service)
+		containers, dockerErr := m.Docker.Containers(ctx, id)
+		configured, mode, socket, caddyErr := m.Caddy.Status(id)
+		if dockerErr != nil || caddyErr != nil {
+			return model.MonitorSnapshot{}, false, fmt.Errorf("observe service status: docker=%v caddy=%v", dockerErr, caddyErr)
+		}
+		bySlot := map[string]model.ContainerStatus{}
+		for _, container := range containers {
+			bySlot[container.Deploy] = container
+		}
+		deployments := map[string]model.DeploymentStatus{}
+		for _, slot := range []string{"blue", "green"} {
+			deploy := service.Deploy[slot]
+			runtime := "absent"
+			if container, ok := bySlot[slot]; ok {
+				runtime = "stopped"
+				if container.Running {
+					runtime = "running"
+				}
+				if deploy.Version == "" {
+					deploy.Version = container.Version
+				}
+			}
+			deployments[slot] = model.DeploymentStatus{
+				Version: deploy.Version, Runtime: runtime, Health: defaultHealth(deploy.Health),
+				ReceivesTraffic: configured && mode == "proxy" && socket == m.Caddy.Socket(id, slot),
+			}
+		}
+		return model.MonitorSnapshot{Type: "status", ObservedAt: time.Now().UTC(), Service: map[string]any{
+			"id": service.ID, "state": service.State, "phase": service.Phase, "operation": service.Operation,
+			"live_deploy": service.LiveDeploy, "target_deploy": service.TargetDeploy, "target_version": service.TargetVersion,
+			"updated_at": service.UpdatedAt, "message": phaseMessage(service.Phase, service.TargetDeploy, service.LiveDeploy), "deployments": deployments,
+		}}, false, nil
+	}
+	if !errors.Is(err, state.ErrNotFound) {
+		return model.MonitorSnapshot{}, false, internal(err)
+	}
+	tombstone, tombErr := m.Repo.GetTombstone(id)
+	if tombErr != nil {
+		if errors.Is(tombErr, state.ErrNotFound) {
+			return model.MonitorSnapshot{}, false, notFound(tombErr)
+		}
+		return model.MonitorSnapshot{}, false, internal(tombErr)
+	}
+	if tombstone.Phase == "" {
+		tombstone.Phase = "deleted"
+	}
+	return model.MonitorSnapshot{Type: "status", ObservedAt: time.Now().UTC(), Service: map[string]any{
+		"id": tombstone.ID, "state": model.Deleted, "phase": tombstone.Phase, "operation": tombstone.Operation,
+		"updated_at": tombstone.UpdatedAt, "message": phaseMessage(tombstone.Phase, "", ""), "deployments": map[string]model.DeploymentStatus{},
+	}}, tombstone.Phase == "deleted", nil
 }
 
 func (m *Manager) List(ctx context.Context) ([]model.Status, error) {
@@ -435,6 +790,7 @@ func (m *Manager) List(ctx context.Context) ([]model.Status, error) {
 }
 
 func (m *Manager) status(ctx context.Context, service model.Service) (*model.Status, error) {
+	derive(&service)
 	result := &model.Status{Service: service}
 	exists, err := m.ZFS.Exists(ctx, service.ID)
 	if err != nil {
@@ -461,7 +817,10 @@ func (m *Manager) status(ctx context.Context, service model.Service) (*model.Sta
 		result.Warnings = append(result.Warnings, "metrics unavailable: "+err.Error())
 	}
 	running := 0
+	result.Deployments = map[string]model.DeploymentStatus{}
+	containers := map[string]model.ContainerStatus{}
 	for _, item := range result.Containers {
+		containers[item.Deploy] = item
 		if item.Running {
 			running++
 		}
@@ -469,10 +828,35 @@ func (m *Manager) status(ctx context.Context, service model.Service) (*model.Sta
 			result.Warnings = append(result.Warnings, "container label mismatch")
 		}
 	}
+	for _, slot := range []string{"blue", "green"} {
+		deploy := service.Deploy[slot]
+		runtime := "absent"
+		if container, ok := containers[slot]; ok {
+			runtime = "stopped"
+			if container.Running {
+				runtime = "running"
+			}
+			if deploy.Version == "" {
+				deploy.Version = container.Version
+			}
+		}
+		result.Deployments[slot] = model.DeploymentStatus{
+			Version: deploy.Version, Runtime: runtime, Health: defaultHealth(deploy.Health),
+			ReceivesTraffic: result.Caddy.Configured && result.Caddy.Mode == "proxy" && result.Caddy.Socket == m.Caddy.Socket(service.ID, slot),
+		}
+	}
+	result.Message = phaseMessage(service.Phase, service.TargetDeploy, service.LiveDeploy)
+	healthyTraffic := false
+	for _, deploy := range result.Deployments {
+		healthyTraffic = healthyTraffic || deploy.ReceivesTraffic && deploy.Health == "healthy"
+	}
+	if service.State == model.Active && !healthyTraffic {
+		result.Warnings = append(result.Warnings, "no healthy instance is receiving traffic")
+	}
 	if service.State == model.Active && running == 0 {
 		result.Warnings = append(result.Warnings, "service is active but no container is running")
 	}
-	if running > 1 {
+	if running > 1 && service.Phase == "running" {
 		result.Warnings = append(result.Warnings, "more than one deployment is running")
 	}
 	if service.State == model.Active && result.Caddy.Socket != m.Caddy.Socket(service.ID, service.LiveDeploy) {
@@ -482,6 +866,45 @@ func (m *Manager) status(ctx context.Context, service model.Service) (*model.Sta
 		result.Warnings = append(result.Warnings, "dataset is missing")
 	}
 	return result, nil
+}
+
+func defaultHealth(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func phaseMessage(phase, target, live string) string {
+	switch phase {
+	case "provisioning":
+		return "Preparing storage and the first instance."
+	case "starting":
+		return "Starting the requested instance."
+	case "waiting_for_health":
+		if target != "" && target != live && live != "" {
+			return strings.ToUpper(target[:1]) + target[1:] + " is starting; " + live + " remains available and receives traffic."
+		}
+		return "The instance is starting and waiting to pass health checks."
+	case "routing":
+		return "Updating traffic routing."
+	case "draining":
+		return "Traffic has switched; the previous instance is draining."
+	case "running":
+		return "The service is running."
+	case "stopping":
+		return "Stopping service instances."
+	case "stopped":
+		return "The service is stopped."
+	case "deleting":
+		return "Deleting the service."
+	case "deleted":
+		return "The service has been deleted."
+	case "failed":
+		return "The last lifecycle operation failed; an administrator can retry it."
+	default:
+		return "Service status is available."
+	}
 }
 
 func (m *Manager) liveService(id string) (model.Service, error) {
@@ -578,11 +1001,16 @@ func (m *Manager) removeSocketDirs(id string) error {
 	return nil
 }
 
-func deployment(socket, id, slot string) model.Deploy {
-	return model.Deploy{
+func deployment(socket, id, slot string, version ...string) model.Deploy {
+	deploy := model.Deploy{
 		Socket:    strings.NewReplacer("{service_id}", id, "{slot}", slot).Replace(socket),
-		Container: "moddengine_" + id + "_" + slot,
+		Container: "WHMCS-" + strings.TrimPrefix(id, "whmcs-") + "-" + slot,
+		Health:    "unknown",
 	}
+	if len(version) > 0 {
+		deploy.Version = version[0]
+	}
+	return deploy
 }
 
 func domains(service model.Service) []string {

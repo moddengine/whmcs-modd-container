@@ -44,3 +44,10 @@ namespace WHMCS\Database {
         public function first(): ?\stdClass {}
     }
 }
+
+namespace WHMCS\Config {
+    final class Setting
+    {
+        public static function getValue(string $name): string {}
+    }
+}

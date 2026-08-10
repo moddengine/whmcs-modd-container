@@ -3,8 +3,11 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,14 +16,18 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 	"github.com/moddengine/whmcs-container-controller/internal/service"
+	"github.com/moddengine/whmcs-container-controller/internal/state"
 )
 
 const maxBody = 1 << 20
@@ -50,6 +57,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/services/{id}/terminate", a.terminate)
 	mux.HandleFunc("DELETE /v1/services/{id}", a.delete)
 	mux.HandleFunc("POST /v1/services/{id}/upgrade", a.upgrade)
+	mux.HandleFunc("POST /v1/services/{id}/monitor-token", a.monitorToken)
+	mux.HandleFunc("GET /v1/services/{id}/status/ws", a.statusWebSocket)
 	return a.requestMiddleware(a.authMiddleware(mux))
 }
 
@@ -123,16 +132,12 @@ func (a *API) provision(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
 		return
 	}
-	status, created, err := a.Manager.Provision(r.Context(), r.PathValue("id"), request, requestID(r))
+	status, accepted, err := a.Manager.Provision(r.Context(), r.PathValue("id"), request, requestID(r))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	code := http.StatusOK
-	if created {
-		code = http.StatusCreated
-	}
-	writeJSON(w, code, status)
+	writeJSON(w, acceptedCode(accepted), map[string]any{"service": status})
 }
 
 func (a *API) suspend(w http.ResponseWriter, r *http.Request) {
@@ -147,21 +152,22 @@ func (a *API) terminate(w http.ResponseWriter, r *http.Request) {
 	a.action(w, r, a.Manager.Terminate)
 }
 
-func (a *API) action(w http.ResponseWriter, r *http.Request, fn func(context.Context, string, string) (*model.Status, error)) {
-	status, err := fn(r.Context(), r.PathValue("id"), requestID(r))
+func (a *API) action(w http.ResponseWriter, r *http.Request, fn func(context.Context, string, string) (*model.Status, bool, error)) {
+	status, accepted, err := fn(r.Context(), r.PathValue("id"), requestID(r))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, status)
+	writeJSON(w, acceptedCode(accepted), map[string]any{"service": status})
 }
 
 func (a *API) delete(w http.ResponseWriter, r *http.Request) {
-	if err := a.Manager.Delete(r.Context(), r.PathValue("id"), requestID(r)); err != nil {
+	tombstone, accepted, err := a.Manager.Delete(r.Context(), r.PathValue("id"), requestID(r))
+	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"state": model.Deleted})
+	writeJSON(w, acceptedCode(accepted), map[string]any{"service": tombstone})
 }
 
 func (a *API) upgrade(w http.ResponseWriter, r *http.Request) {
@@ -170,17 +176,168 @@ func (a *API) upgrade(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
 		return
 	}
-	status, err := a.Manager.Upgrade(r.Context(), r.PathValue("id"), request, requestID(r))
+	status, accepted, err := a.Manager.Upgrade(r.Context(), r.PathValue("id"), request, requestID(r))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, status)
+	writeJSON(w, acceptedCode(accepted), map[string]any{"service": status})
+}
+
+type monitorClaims struct {
+	ServiceID string `json:"service_id"`
+	Origin    string `json:"origin"`
+	Expires   int64  `json:"exp"`
+}
+
+func (a *API) monitorToken(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Origin string `json:"origin"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
+		return
+	}
+	origin, err := validOrigin(request.Origin)
+	if err != nil {
+		a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
+		return
+	}
+	id := r.PathValue("id")
+	if err := service.ValidateServiceID(id); err != nil {
+		a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
+		return
+	}
+	if _, err := a.Manager.Repo.Get(id); err != nil {
+		if !errors.Is(err, state.ErrNotFound) {
+			a.writeError(w, r, err)
+			return
+		}
+		if _, tombErr := a.Manager.Repo.GetTombstone(id); tombErr != nil {
+			if !errors.Is(tombErr, state.ErrNotFound) {
+				a.writeError(w, r, tombErr)
+				return
+			}
+			a.writeError(w, r, &service.Error{Code: "not_found", Status: 404, Err: errors.New("service not found")})
+			return
+		}
+	}
+	expires := time.Now().UTC().Add(time.Hour)
+	token, err := signMonitorToken(monitorClaims{ServiceID: id, Origin: origin, Expires: expires.Unix()}, a.Token)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "expires_at": expires})
+}
+
+func (a *API) statusWebSocket(w http.ResponseWriter, r *http.Request) {
+	protocols := strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",")
+	if len(protocols) != 2 || strings.TrimSpace(protocols[0]) != "modd-monitor" {
+		writeJSON(w, http.StatusUnauthorized, errorBody("invalid_monitor_token", "monitor token required", requestID(r)))
+		return
+	}
+	claims, err := verifyMonitorToken(strings.TrimSpace(protocols[1]), a.Token)
+	if err != nil || claims.ServiceID != r.PathValue("id") || claims.Origin != r.Header.Get("Origin") {
+		writeJSON(w, http.StatusUnauthorized, errorBody("invalid_monitor_token", "monitor token is invalid or expired", requestID(r)))
+		return
+	}
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"modd-monitor"}, InsecureSkipVerify: true})
+	if err != nil {
+		return
+	}
+	defer conn.CloseNow()
+	ctx := conn.CloseRead(context.Background())
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var previous []byte
+	for {
+		if time.Now().Unix() >= claims.Expires {
+			_ = conn.Close(websocket.StatusPolicyViolation, "monitor token expired")
+			return
+		}
+		snapshot, deleted, err := a.Manager.MonitorSnapshot(ctx, claims.ServiceID)
+		if err != nil {
+			_ = conn.Close(websocket.StatusInternalError, "status unavailable")
+			return
+		}
+		current, _ := json.Marshal(snapshot.Service)
+		if !hmac.Equal(previous, current) {
+			if err := wsjson.Write(ctx, conn, snapshot); err != nil {
+				return
+			}
+			previous = current
+		}
+		if deleted {
+			_ = conn.Close(websocket.StatusNormalClosure, "deleted")
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func signMonitorToken(claims monitorClaims, secret string) (string, error) {
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	body := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(body))
+	return body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func verifyMonitorToken(token, secret string) (monitorClaims, error) {
+	var claims monitorClaims
+	body, signature, ok := strings.Cut(token, ".")
+	if !ok {
+		return claims, errors.New("malformed token")
+	}
+	want := hmac.New(sha256.New, []byte(secret))
+	_, _ = want.Write([]byte(body))
+	got, err := base64.RawURLEncoding.DecodeString(signature)
+	if err != nil || !hmac.Equal(got, want.Sum(nil)) {
+		return claims, errors.New("invalid signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return claims, err
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return claims, err
+	}
+	if claims.ServiceID == "" || claims.Origin == "" || time.Now().Unix() >= claims.Expires {
+		return claims, errors.New("expired token")
+	}
+	return claims, nil
+}
+
+func validOrigin(value string) (string, error) {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("origin must be an HTTPS origin")
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
+}
+
+func acceptedCode(accepted bool) int {
+	if accepted {
+		return http.StatusAccepted
+	}
+	return http.StatusOK
 }
 
 func (a *API) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/status/ws") {
 			next.ServeHTTP(w, r)
 			return
 		}

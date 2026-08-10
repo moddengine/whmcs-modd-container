@@ -126,6 +126,25 @@ func (r *Repository) TombstoneCount() (int, error) {
 	return count, nil
 }
 
+func (r *Repository) ListTombstones() ([]model.Tombstone, error) {
+	entries, err := os.ReadDir(r.tombstonesDir)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]model.Tombstone, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".toml") {
+			continue
+		}
+		item, err := r.GetTombstone(strings.TrimSuffix(entry.Name(), ".toml"))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, nil
+}
+
 func (r *Repository) servicePath(id string) string { return filepath.Join(r.servicesDir, id+".toml") }
 func (r *Repository) tombstonePath(id string) string {
 	return filepath.Join(r.tombstonesDir, id+".toml")

@@ -24,9 +24,9 @@ func TestSocketTemplateValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for socket, valid := range map[string]bool{
-		"/run/moddengine/{service_id}-{slot}.sock":           true,
-		"/run/moddengine/{service_id}.sock":                  false,
-		"/run/moddengine/{service_id}-{slot}-{service}.sock": false,
+		"/run/whmcs/{service_id}-{slot}.sock":           true,
+		"/run/whmcs/{service_id}.sock":                  false,
+		"/run/whmcs/{service_id}-{slot}-{service}.sock": false,
 	} {
 		config.Deployment.Socket = socket
 		if err := config.Validate(); (err == nil) != valid {

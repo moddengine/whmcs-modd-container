@@ -1,7 +1,7 @@
 # Modd Hosting for WHMCS
 
 Modd Hosting connects WHMCS to a small Go controller that provisions and
-manages ModdEngine containers on a single Linux host.
+manages website application containers on a single Linux host.
 
 WHMCS remains responsible for customers, billing, products, and administrator
 actions. The controller owns the host-local work:
@@ -63,7 +63,7 @@ deliberately disabled; termination and deletion are administrator actions in
 - `useradd`, `groupadd`, `userdel`, and `groupdel` for per-service identities;
 - a Caddy container or trusted Caddy proxy;
 - the configured Docker network;
-- locally available ModdEngine images; and
+- locally available application images; and
 - WHMCS with PHP 8.1 or newer and cURL.
 
 The controller runs as root because it manages ZFS, Docker, Caddy files, and
@@ -89,7 +89,7 @@ the downloaded release binary when using a release):
 sudo install -m 0755 go-service/controller /usr/local/bin/modd-hosting-controller
 sudo install -d -m 0750 /etc/modd-hosting /var/lib/modd-hosting/caddy/services
 sudo install -d -m 0750 /var/lib/modd-hosting/services /var/lib/modd-hosting/tombstones
-sudo install -d -m 0750 /srv/modd-suspended /run/moddengine
+sudo install -d -m 0750 /srv/modd-suspended /run/whmcs
 sudo install -m 0640 go-service/config.example.toml /etc/modd-hosting/controller.toml
 sudo install -m 0644 go-service/packaging/suspended/index.html /srv/modd-suspended/index.html
 openssl rand -hex 32 | sudo tee /etc/modd-hosting/api-token >/dev/null
@@ -182,7 +182,7 @@ Available versions are local tags matching
 it in WHMCS:
 
 ```sh
-docker pull moddengine/moddengine:v21.6.24
+docker pull your-registry/whmcs-runtime:v21.6.24
 ```
 
 Bind entries accept these placeholders:

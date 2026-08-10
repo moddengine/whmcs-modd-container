@@ -20,7 +20,7 @@ service_config_dir = "/var/lib/modd-hosting/caddy/services"
 suspension_root = "/srv/modd-suspended"
 active_template = """
 {domain} {
-  reverse_proxy unix//run/moddengine/{service_id}-{slot}/http.sock
+  reverse_proxy unix//run/whmcs/{service_id}-{slot}/http.sock
 }
 """
 validate_command = ["docker", "exec", "caddy", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
@@ -28,7 +28,7 @@ reload_command = ["docker", "exec", "caddy", "caddy", "reload", "--config", "/et
 
 [docker]
 network = "udo-net"
-image_repository = "moddengine/moddengine"
+image_repository = "whmcs-runtime"
 binds = [
   "{mountpoint}/site:/srv/modd/site",
   "{mountpoint}/backup:/srv/modd/backup",
@@ -43,7 +43,7 @@ health_attempts = 30
 health_initial_delay = "3s"
 health_backoff_increment = "2s"
 traffic_drain = "10s"
-socket = "/run/moddengine/{service_id}-{slot}/http.sock"
+socket = "/run/whmcs/{service_id}-{slot}/http.sock"
 
 [domains]
 staging_suffix = "staging.com"

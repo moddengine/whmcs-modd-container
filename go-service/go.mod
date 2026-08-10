@@ -3,6 +3,7 @@ module github.com/moddengine/whmcs-container-controller
 go 1.25.0
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/pelletier/go-toml/v2 v2.2.4
 )

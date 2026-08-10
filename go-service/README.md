@@ -36,3 +36,17 @@ or `SERVICE_ID` when the test host differs from the playbook layout.
 Back up `/var/lib/modd-hosting/services` and
 `/var/lib/modd-hosting/tombstones`; site data follows the ZFS pool's normal
 snapshot and replication policy.
+
+## Browser status monitoring
+
+The WHMCS server creates a one-hour browser token with
+`POST /v1/services/{id}/monitor-token`, authenticated by the controller bearer
+credential and a JSON body containing the WHMCS HTTPS `origin`. The browser
+then connects to `wss://controller/v1/services/{id}/status/ws` with two
+`Sec-WebSocket-Protocol` values: `modd-monitor` and that token. Its automatic
+`Origin` header must match the token.
+
+The socket sends a full `status` snapshot immediately, then only when the
+repository, Docker, or Caddy view changes. It polls once per second, has no
+history, and closes normally after sending the final `deleted` snapshot. See
+`openapi.yaml` for the handshake and snapshot schemas.

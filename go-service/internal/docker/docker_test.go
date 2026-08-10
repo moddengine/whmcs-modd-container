@@ -58,10 +58,10 @@ func TestContainerSpec(t *testing.T) {
 	service := model.Service{
 		ID: "whmcs-123", MainDomain: "example.com", Version: "v21.6.24",
 		Dataset: model.DatasetRecord{Mountpoint: "/modd/sites/whmcs-123"},
-		Deploy:  map[string]model.Deploy{"blue": {Socket: "/run/moddengine/whmcs-123-blue/http.sock"}},
+		Deploy:  map[string]model.Deploy{"blue": {Socket: "/run/whmcs/whmcs-123-blue/http.sock"}},
 	}
 	cfg := config.Docker{
-		Network: "udo-net", ImageRepository: "moddengine/moddengine",
+		Network: "udo-net", ImageRepository: "whmcs-runtime",
 		Binds:       []string{"{mountpoint}/{slot}/cache:/cache"},
 		Environment: []string{"SERVICE={service_id}", "DATA={mountpoint}", "DEPLOY={slot}"},
 	}
@@ -69,9 +69,10 @@ func TestContainerSpec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Image != "moddengine/moddengine:v21.6.24" ||
+	if spec.Image != "whmcs-runtime:v21.6.24" ||
 		spec.User != "10123:10123" ||
 		spec.Labels[serviceLabel] != "whmcs-123" ||
+		spec.Labels[appLabel] != "whmcs" ||
 		spec.Labels[deployLabel] != "blue" {
 		t.Fatalf("unexpected container spec: %#v", spec)
 	}
@@ -85,7 +86,7 @@ func TestContainerSpec(t *testing.T) {
 	}
 	if !slices.Equal(host.Binds, []string{
 		"/modd/sites/whmcs-123/blue/cache:/cache",
-		"/run/moddengine/whmcs-123-blue:/run/moddengine/whmcs-123-blue",
+		"/run/whmcs/whmcs-123-blue:/run/whmcs/whmcs-123-blue",
 	}) {
 		t.Fatalf("unexpected binds: %#v", host.Binds)
 	}

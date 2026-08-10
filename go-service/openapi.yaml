@@ -110,15 +110,16 @@ paths:
               version: v21.6.24
               display_name: My site
       responses:
-        "200": { description: Existing identical service, content: { application/json: { schema: { $ref: "#/components/schemas/ServiceStatus" } } } }
-        "201": { description: Service provisioned, content: { application/json: { schema: { $ref: "#/components/schemas/ServiceStatus" } } } }
+        "200": { description: Identical provisioning already complete, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
+        "202": { description: Synchronous provisioning complete; health and routing continue, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
     delete:
       summary: Permanently delete a terminated service
       operationId: deleteService
       responses:
-        "200": { $ref: "#/components/responses/JSONObject" }
+        "200": { description: Deletion already complete, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
+        "202": { description: Resources removed; routing cleanup continues, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
         "409": { $ref: "#/components/responses/Error" }
   /v1/services/{id}/suspend:
     post:
@@ -127,6 +128,7 @@ paths:
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]
       responses:
         "200": { $ref: "#/components/responses/ServiceStatus" }
+        "202": { $ref: "#/components/responses/ServiceStatus" }
         "409": { $ref: "#/components/responses/Error" }
   /v1/services/{id}/resume:
     post:
@@ -135,6 +137,7 @@ paths:
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]
       responses:
         "200": { $ref: "#/components/responses/ServiceStatus" }
+        "202": { $ref: "#/components/responses/ServiceStatus" }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
   /v1/services/{id}/terminate:
@@ -144,6 +147,7 @@ paths:
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]
       responses:
         "200": { $ref: "#/components/responses/ServiceStatus" }
+        "202": { $ref: "#/components/responses/ServiceStatus" }
         "409": { $ref: "#/components/responses/Error" }
   /v1/services/{id}/upgrade:
     post:
@@ -160,8 +164,45 @@ paths:
               confirm_downgrade: true
       responses:
         "200": { $ref: "#/components/responses/ServiceStatus" }
+        "202": { $ref: "#/components/responses/ServiceStatus" }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
+  /v1/services/{id}/monitor-token:
+    post:
+      summary: Create a one-hour read-only browser monitor token
+      operationId: createMonitorToken
+      parameters: [{ $ref: "#/components/parameters/ServiceID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties: { origin: { type: string, format: uri } }
+              required: [origin]
+      responses:
+        "200":
+          description: HMAC token scoped to the service and WHMCS origin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  expires_at: { type: string, format: date-time }
+                required: [token, expires_at]
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/services/{id}/status/ws:
+    get:
+      summary: Monitor current service status over WebSocket
+      description: Pass `modd-monitor` and the monitor token as Sec-WebSocket-Protocol values. The browser Origin must match the token. A full StatusSnapshot is sent immediately and thereafter only when state changes, at one-second observation intervals. The final deleted snapshot is followed by a normal close.
+      operationId: monitorServiceStatus
+      security: []
+      parameters: [{ $ref: "#/components/parameters/ServiceID" }]
+      responses:
+        "101": { description: WebSocket upgrade; messages use the StatusSnapshot schema }
+        "401": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearerAuth:
@@ -209,12 +250,70 @@ components:
         staging_domain: { type: string }
         version: { type: string }
         live_deploy: { type: string, enum: [blue, green] }
+        phase: { type: string, enum: [provisioning, starting, waiting_for_health, routing, draining, running, stopping, stopped, deleting, deleted, failed] }
+        operation: { type: string, enum: [provision, resume, suspend, terminate, upgrade, delete] }
+        target_deploy: { type: string, enum: [blue, green] }
+        target_version: { type: string }
+        message: { type: string }
+        deployments:
+          type: object
+          properties:
+            blue: { $ref: "#/components/schemas/DeploymentStatus" }
+            green: { $ref: "#/components/schemas/DeploymentStatus" }
         dataset_exists: { type: boolean }
         dataset_used_bytes: { type: integer, minimum: 0 }
         containers: { type: array, items: { type: object } }
         metrics: { type: object }
         warnings: { type: array, items: { type: string } }
-      required: [id, state, main_domain, staging_domain, version, live_deploy, warnings]
+      required: [id, state, phase, main_domain, staging_domain, version, live_deploy, message, deployments, warnings]
+    DeploymentStatus:
+      type: object
+      properties:
+        version: { type: string }
+        runtime: { type: string, enum: [absent, stopped, running] }
+        health: { type: string, enum: [unknown, checking, healthy, unhealthy] }
+        receives_traffic: { type: boolean }
+      required: [runtime, health, receives_traffic]
+    ActionResult:
+      type: object
+      properties:
+        service:
+          oneOf:
+            - { $ref: "#/components/schemas/ServiceStatus" }
+            - { $ref: "#/components/schemas/TombstoneStatus" }
+      required: [service]
+    TombstoneStatus:
+      type: object
+      properties:
+        id: { type: string }
+        state: { type: string, const: deleted }
+        phase: { type: string, enum: [deleting, deleted, failed] }
+        operation: { type: string, enum: [delete] }
+        updated_at: { type: string, format: date-time }
+      required: [id, state, phase, updated_at]
+    MonitorServiceStatus:
+      type: object
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [active, suspended, terminated, deleted] }
+        phase: { type: string, enum: [provisioning, starting, waiting_for_health, routing, draining, running, stopping, stopped, deleting, deleted, failed] }
+        operation: { type: string, enum: [provision, resume, suspend, terminate, upgrade, delete] }
+        live_deploy: { type: string, enum: [blue, green] }
+        target_deploy: { type: string, enum: [blue, green] }
+        target_version: { type: string }
+        updated_at: { type: string, format: date-time }
+        message: { type: string }
+        deployments:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/DeploymentStatus" }
+      required: [id, state, phase, updated_at, message, deployments]
+    StatusSnapshot:
+      type: object
+      properties:
+        type: { type: string, const: status }
+        observed_at: { type: string, format: date-time }
+        service: { $ref: "#/components/schemas/MonitorServiceStatus" }
+      required: [type, observed_at, service]
     Error:
       type: object
       properties:
@@ -231,7 +330,7 @@ components:
       description: Service status
       content:
         application/json:
-          schema: { $ref: "#/components/schemas/ServiceStatus" }
+          schema: { $ref: "#/components/schemas/ActionResult" }
     Error:
       description: Structured error
       content:

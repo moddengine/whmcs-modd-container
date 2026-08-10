@@ -16,7 +16,7 @@ func main() {
 	}
 	path := os.Getenv("ME_SOCKET")
 	if path == "" {
-		path = filepath.Join("/run/moddengine", os.Getenv("ME_INSTANCE"), "http.sock")
+		path = filepath.Join("/run/whmcs", os.Getenv("ME_INSTANCE"), "http.sock")
 	}
 	_ = os.Remove(path)
 	listener, err := net.Listen("unix", path)

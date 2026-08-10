@@ -93,7 +93,7 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 	}
 	labels := map[string]string{
 		managedLabel: "true", serviceLabel: service.ID, versionLabel: service.Version,
-		appLabel: "moddengine", deployLabel: slot,
+		appLabel: "whmcs", deployLabel: slot,
 	}
 	replacer := strings.NewReplacer(
 		"{mountpoint}", service.Dataset.Mountpoint,

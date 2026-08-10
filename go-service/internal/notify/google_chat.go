@@ -38,7 +38,7 @@ func (g GoogleChat) Send(ctx context.Context, operation string, success bool, se
 	body, _ := json.Marshal(map[string]string{"text": text})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.Webhook, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return redacted(err, g.Webhook)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := g.Client
@@ -47,13 +47,17 @@ func (g GoogleChat) Send(ctx context.Context, operation string, success bool, se
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return redacted(err, g.Webhook)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("google chat returned HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func redacted(err error, secret string) error {
+	return fmt.Errorf("%s", strings.ReplaceAll(err.Error(), secret, "[redacted]"))
 }
 
 type Disabled struct{}

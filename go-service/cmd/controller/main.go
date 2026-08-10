@@ -103,6 +103,9 @@ func main() {
 		},
 		Metrics: metrics.Mock{}, Notify: notifier, Logger: logger,
 	}
+	if err := manager.RecoverInterrupted(); err != nil {
+		fatal(fmt.Errorf("recover interrupted operations: %w", err))
+	}
 	handler := (&api.API{
 		Manager: manager, Config: cfg, Token: token, Logger: logger,
 		Version: version, Commit: commit, BuildDate: buildDate, DockerAPI: dockerAPI,

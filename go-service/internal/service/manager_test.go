@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/moddengine/whmcs-container-controller/internal/config"
+	"github.com/moddengine/whmcs-container-controller/internal/model"
+	"github.com/moddengine/whmcs-container-controller/internal/state"
 )
 
 func TestCleanupOldDeploySurvivesRequestCancellation(t *testing.T) {
@@ -22,6 +24,42 @@ func TestCleanupOldDeploySurvivesRequestCancellation(t *testing.T) {
 	}
 	if !removed {
 		t.Fatal("old deployment was not removed")
+	}
+}
+
+func TestDeriveLegacyLifecycleState(t *testing.T) {
+	active := model.Service{State: model.Active, Version: "v1", LiveDeploy: "blue", Deploy: map[string]model.Deploy{"blue": {}}}
+	derive(&active)
+	if active.Phase != "running" || active.Deploy["blue"].Version != "v1" || active.Deploy["blue"].Health != "unknown" {
+		t.Fatalf("unexpected active defaults: %#v", active)
+	}
+	stopped := model.Service{State: model.Suspended}
+	derive(&stopped)
+	if stopped.Phase != "stopped" {
+		t.Fatalf("phase = %q", stopped.Phase)
+	}
+}
+
+func TestRecoverInterruptedMarksDeferredWorkFailed(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Put(model.Service{ID: "whmcs-1", State: model.Active, Phase: "routing", Operation: "upgrade"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.PutTombstone(model.Tombstone{ID: "whmcs-2", State: model.Deleted, Phase: "deleting", Operation: "delete"}); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Repo: repo}
+	if err := manager.RecoverInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	service, _ := repo.Get("whmcs-1")
+	tombstone, _ := repo.GetTombstone("whmcs-2")
+	if service.Phase != "failed" || tombstone.Phase != "failed" {
+		t.Fatalf("service=%q tombstone=%q", service.Phase, tombstone.Phase)
 	}
 }
 
@@ -55,6 +93,12 @@ func TestServiceID(t *testing.T) {
 		if ValidateServiceID(invalid) == nil {
 			t.Fatalf("accepted invalid service ID %q", invalid)
 		}
+	}
+}
+
+func TestDeploymentContainerName(t *testing.T) {
+	if got := deployment("/run/whmcs/{service_id}-{slot}/http.sock", "whmcs-123", "blue").Container; got != "WHMCS-123-blue" {
+		t.Fatalf("unexpected container name %q", got)
 	}
 }
 

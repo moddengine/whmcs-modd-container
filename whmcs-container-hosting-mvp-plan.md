@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-Build a minimal WHMCS integration and lightweight Go orchestration controller for provisioning and managing ModdEngine website containers behind Caddy.
+Build a minimal WHMCS integration and lightweight Go orchestration controller for provisioning and managing website containers behind Caddy.
 
 The MVP deliberately avoids becoming a general-purpose hosting platform. WHMCS remains responsible for billing, customer records, service records, and manual administrator actions. The Go controller performs host-local lifecycle operations and derives current state from Docker, ZFS, per-service TOML files, and individual Caddy configuration files.
 
@@ -699,7 +699,7 @@ reload_command = ["docker", "exec", "caddy", "caddy", "reload", "--config", "/et
 
 [docker]
 network = "udo-net"
-image_repository = "moddengine/moddengine"
+image_repository = "whmcs-runtime"
 
 [deployment]
 health_path = "/~/health/check"
@@ -707,7 +707,7 @@ health_attempts = 30
 health_initial_delay = "3s"
 health_backoff_increment = "2s"
 traffic_drain = "10s"
-socket = "/run/moddengine/{service_id}-{slot}/http.sock"
+socket = "/run/whmcs/{service_id}-{slot}/http.sock"
 
 [domains]
 staging_suffix = "staging.com"
@@ -781,12 +781,12 @@ mountpoint = "/modd/sites/whmcs-123"
 caddyfile = "/var/lib/modd-hosting/caddy/services/whmcs-123.caddy"
 
 [deploy.blue]
-socket = "/run/moddengine/whmcs-123-blue/http.sock"
-container = "moddengine_whmcs-123_blue"
+socket = "/run/whmcs/whmcs-123-blue/http.sock"
+container = "WHMCS-123-blue"
 
 [deploy.green]
-socket = "/run/moddengine/whmcs-123-green/http.sock"
-container = "moddengine_whmcs-123_green"
+socket = "/run/whmcs/whmcs-123-green/http.sock"
+container = "WHMCS-123-green"
 ```
 
 ### 10.1 TOML writing requirements
@@ -871,7 +871,7 @@ Example service mountpoint:
 Host socket paths remain outside the dataset:
 
 ```text
-/run/moddengine/
+/run/whmcs/
 ├── whmcs-123-blue/
 │   └── http.sock
 └── whmcs-123-green/
@@ -968,7 +968,7 @@ Every managed container must include:
 au.modd.managed=true
 au.modd.service-id=whmcs-123
 au.modd.version=v21.6.24
-au.modd.app=moddengine
+au.modd.app=whmcs
 au.modd.deploy=blue
 ```
 
@@ -983,14 +983,14 @@ These labels are the primary way status calls identify managed service container
 ### 14.2 Naming convention
 
 ```text
-moddengine_{service-id}_{deploy}
+WHMCS-{service-id}-{deploy}
 ```
 
 Example:
 
 ```text
-moddengine_whmcs-123_blue
-moddengine_whmcs-123_green
+WHMCS-123-blue
+WHMCS-123-green
 ```
 
 ### 14.3 Container settings
@@ -1003,7 +1003,7 @@ Translate the required runtime behavior from the current deployment script into 
 - `.htaccess` generation.
 - Apache web-root symlinks.
 
-Retain only settings still required by the ModdEngine image, including where applicable:
+Retain only settings still required by the application image, including where applicable:
 
 - Configured image repository and selected tag.
 - Required bind mounts.
@@ -1189,7 +1189,7 @@ Example:
 
 ```caddyfile
 mysite.com, mysite-com.staging.com {
-    reverse_proxy unix//run/moddengine/whmcs-123-blue/http.sock
+    reverse_proxy unix//run/whmcs/whmcs-123-blue/http.sock
 }
 ```
 
@@ -1263,11 +1263,11 @@ Suggested response:
   "caddy": {
     "configured": true,
     "mode": "proxy",
-    "socket": "/run/moddengine/whmcs-123-green/http.sock"
+    "socket": "/run/whmcs/whmcs-123-green/http.sock"
   },
   "containers": [
     {
-      "name": "moddengine_whmcs-123_green",
+      "name": "WHMCS-123-green",
       "deploy": "green",
       "version": "v21.6.24",
       "exists": true,
@@ -1277,7 +1277,7 @@ Suggested response:
         "au.modd.managed": "true",
         "au.modd.service-id": "whmcs-123",
         "au.modd.version": "v21.6.24",
-        "au.modd.app": "moddengine",
+        "au.modd.app": "whmcs",
         "au.modd.deploy": "green"
       }
     }
@@ -1509,13 +1509,13 @@ Do not return sensitive paths unnecessarily to non-administrator clients. Since 
 
 ## Phase 1: Finalize runtime contract
 
-- [ ] Document the exact ModdEngine image repository.
+- [ ] Document the exact application image repository.
 - [ ] Document required environment variables.
 - [ ] Document required bind mounts.
 - [ ] Confirm whether the MySQL socket bind remains required.
 - [ ] Confirm shared-secrets mount requirements.
 - [ ] Confirm the container process creates `/run/nginx/nginx.sock` or whether the new public socket should be renamed internally.
-- [ ] Define host-to-container mapping for `/run/moddengine/{service}-{deploy}/http.sock`.
+- [ ] Define host-to-container mapping for `/run/whmcs/{service}-{deploy}/http.sock`.
 - [ ] Confirm Docker network name.
 - [ ] Confirm restart policy.
 - [ ] Confirm health endpoint and required headers.

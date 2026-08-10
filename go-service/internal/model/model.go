@@ -29,6 +29,10 @@ type Service struct {
 	DisplayName   string            `toml:"display_name,omitempty" json:"display_name,omitempty"`
 	Version       string            `toml:"version" json:"version"`
 	LiveDeploy    string            `toml:"live_deploy" json:"live_deploy"`
+	Phase         string            `toml:"phase,omitempty" json:"phase"`
+	Operation     string            `toml:"operation,omitempty" json:"operation,omitempty"`
+	TargetDeploy  string            `toml:"target_deploy,omitempty" json:"target_deploy,omitempty"`
+	TargetVersion string            `toml:"target_version,omitempty" json:"target_version,omitempty"`
 	CreatedAt     time.Time         `toml:"created_at" json:"created_at"`
 	UpdatedAt     time.Time         `toml:"updated_at" json:"updated_at"`
 	LastError     string            `toml:"last_error,omitempty" json:"last_error,omitempty"`
@@ -49,6 +53,8 @@ type PathRecord struct {
 type Deploy struct {
 	Socket    string `toml:"socket" json:"socket"`
 	Container string `toml:"container" json:"container"`
+	Version   string `toml:"version,omitempty" json:"version,omitempty"`
+	Health    string `toml:"health,omitempty" json:"health,omitempty"`
 }
 
 type Tombstone struct {
@@ -59,6 +65,10 @@ type Tombstone struct {
 	LastVersion   string    `toml:"last_version" json:"last_version"`
 	DeletedAt     time.Time `toml:"deleted_at" json:"deleted_at"`
 	FormerDataset string    `toml:"former_dataset" json:"former_dataset"`
+	Phase         string    `toml:"phase,omitempty" json:"phase"`
+	Operation     string    `toml:"operation,omitempty" json:"operation,omitempty"`
+	UpdatedAt     time.Time `toml:"updated_at,omitempty" json:"updated_at"`
+	LastError     string    `toml:"last_error,omitempty" json:"last_error,omitempty"`
 }
 
 type ContainerStatus struct {
@@ -80,12 +90,27 @@ type Metrics struct {
 
 type Status struct {
 	Service
-	DatasetExists bool              `json:"dataset_exists"`
-	DatasetUsed   uint64            `json:"dataset_used_bytes"`
-	Caddy         CaddyStatus       `json:"caddy"`
-	Containers    []ContainerStatus `json:"containers"`
-	Metrics       Metrics           `json:"metrics"`
-	Warnings      []string          `json:"warnings"`
+	DatasetExists bool                        `json:"dataset_exists"`
+	DatasetUsed   uint64                      `json:"dataset_used_bytes"`
+	Caddy         CaddyStatus                 `json:"caddy"`
+	Containers    []ContainerStatus           `json:"containers"`
+	Metrics       Metrics                     `json:"metrics"`
+	Warnings      []string                    `json:"warnings"`
+	Message       string                      `json:"message"`
+	Deployments   map[string]DeploymentStatus `json:"deployments"`
+}
+
+type DeploymentStatus struct {
+	Version         string `json:"version,omitempty"`
+	Runtime         string `json:"runtime"`
+	Health          string `json:"health"`
+	ReceivesTraffic bool   `json:"receives_traffic"`
+}
+
+type MonitorSnapshot struct {
+	Type       string    `json:"type"`
+	ObservedAt time.Time `json:"observed_at"`
+	Service    any       `json:"service"`
 }
 
 type CaddyStatus struct {

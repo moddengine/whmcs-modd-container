@@ -141,12 +141,52 @@ function moddhosting_AdminServicesTabFieldsSave(array $params): void
  */
 function moddhosting_ClientArea(array $params): array
 {
-    try {
-        $status = moddhosting_client($params)->request('GET', '/v1/services/' . moddhosting_service_id($params));
-    } catch (\Throwable $error) {
-        $status = ['state' => 'unavailable'];
-    }
-    return ['templatefile' => 'clientarea', 'vars' => ['controllerStatus' => $status]];
+	$id = moddhosting_service_id($params);
+	$token = '';
+	$expires = '';
+	try {
+		$client = moddhosting_client($params);
+		$status = moddhosting_public_status($client->request('GET', '/v1/services/' . $id));
+		$monitor = $client->request('POST', '/v1/services/' . $id . '/monitor-token', ['origin' => moddhosting_origin($params)]);
+		$token = is_string($monitor['token'] ?? null) ? $monitor['token'] : '';
+		$expires = is_string($monitor['expires_at'] ?? null) ? $monitor['expires_at'] : '';
+	} catch (\Throwable $error) {
+		$status = ['id' => moddhosting_service_id($params), 'state' => 'unavailable', 'phase' => 'failed', 'message' => 'Live status is temporarily unavailable.', 'deployments' => []];
+	}
+	return ['templatefile' => 'clientarea', 'vars' => [
+		'controllerStatusJSON' => json_encode($status, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR),
+		'monitorTokenJSON' => json_encode($token, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR),
+		'monitorExpiryJSON' => json_encode($expires, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR),
+		'monitorUrlJSON' => json_encode(moddhosting_websocket_url($params, $id), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR),
+	]];
+}
+
+/**
+ * @param array<string, mixed> $status
+ * @return array<string, mixed>
+ */
+function moddhosting_public_status(array $status): array
+{
+	return array_intersect_key($status, array_flip(['id', 'state', 'phase', 'operation', 'live_deploy', 'target_deploy', 'target_version', 'updated_at', 'message', 'deployments']));
+}
+
+/** @param array<string, mixed> $params */
+function moddhosting_origin(array $params): string
+{
+	$url = (string) ($params['systemurl'] ?? \WHMCS\Config\Setting::getValue('SystemURL'));
+	$parts = parse_url($url);
+	if (($parts['scheme'] ?? '') !== 'https' || empty($parts['host'])) {
+		throw new \RuntimeException('WHMCS System URL must use HTTPS for live status.');
+	}
+	return 'https://' . $parts['host'] . (isset($parts['port']) ? ':' . $parts['port'] : '');
+}
+
+/** @param array<string, mixed> $params */
+function moddhosting_websocket_url(array $params, string $id): string
+{
+	$host = trim((string) ($params['serverhostname'] ?: $params['serverip']));
+	$port = (int) ($params['serverport'] ?? 443) ?: 443;
+	return 'wss://' . $host . ':' . $port . '/v1/services/' . rawurlencode($id) . '/status/ws';
 }
 
 /**
