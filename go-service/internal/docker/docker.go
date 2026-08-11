@@ -2,8 +2,12 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +24,8 @@ import (
 	"github.com/moddengine/whmcs-container-controller/internal/isolation"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 )
+
+const dockerHubAPI = "https://hub.docker.com/v2/namespaces"
 
 const (
 	managedLabel = "au.modd.managed"
@@ -272,6 +278,91 @@ func (a *Adapter) HasVersion(ctx context.Context, version string) (bool, error) 
 		}
 	}
 	return false, nil
+}
+
+func (a *Adapter) Pull(ctx context.Context, version string) (model.ImageVersion, error) {
+	if version == "" {
+		var err error
+		version, err = latestHubVersion(ctx, http.DefaultClient, dockerHubAPI, a.cfg.ImageRepository)
+		if err != nil {
+			return model.ImageVersion{}, err
+		}
+	}
+	if err := ValidateVersion(version); err != nil {
+		return model.ImageVersion{}, err
+	}
+	reference := a.cfg.ImageRepository + ":" + version
+	stream, err := a.client.ImagePull(ctx, reference, image.PullOptions{})
+	if err != nil {
+		return model.ImageVersion{}, fmt.Errorf("pull %s: %w", reference, err)
+	}
+	defer stream.Close()
+	decoder := json.NewDecoder(stream)
+	for {
+		var message struct {
+			Error string `json:"error"`
+		}
+		if err := decoder.Decode(&message); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return model.ImageVersion{}, fmt.Errorf("read pull response: %w", err)
+		} else if message.Error != "" {
+			return model.ImageVersion{}, errors.New(message.Error)
+		}
+	}
+	return model.ImageVersion{Version: version, ImageReference: reference, Local: true}, nil
+}
+
+func latestHubVersion(ctx context.Context, client *http.Client, baseURL, repository string) (string, error) {
+	repository = strings.TrimPrefix(repository, "docker.io/")
+	repository = strings.TrimPrefix(repository, "index.docker.io/")
+	parts := strings.Split(repository, "/")
+	if len(parts) == 1 {
+		parts = append([]string{"library"}, parts...)
+	}
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", fmt.Errorf("image repository %q is not a Docker Hub namespace/repository", repository)
+	}
+	var newest string
+	var newestAt time.Time
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("%s/%s/repositories/%s/tags?page=%d&page_size=100", baseURL, url.PathEscape(parts[0]), url.PathEscape(parts[1]), page)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return "", err
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return "", fmt.Errorf("list Docker Hub tags: %w", err)
+		}
+		var pageData struct {
+			Next    string `json:"next"`
+			Results []struct {
+				Name       string    `json:"name"`
+				LastPushed time.Time `json:"tag_last_pushed"`
+			} `json:"results"`
+		}
+		err = json.NewDecoder(io.LimitReader(response.Body, 10<<20)).Decode(&pageData)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("Docker Hub returned %s", response.Status)
+		}
+		if err != nil {
+			return "", fmt.Errorf("decode Docker Hub tags: %w", err)
+		}
+		for _, tag := range pageData.Results {
+			if strings.HasPrefix(tag.Name, "v") && (newest == "" || tag.LastPushed.After(newestAt)) {
+				newest, newestAt = tag.Name, tag.LastPushed
+			}
+		}
+		if pageData.Next == "" {
+			break
+		}
+	}
+	if newest == "" {
+		return "", errors.New("Docker Hub has no image tag starting with v")
+	}
+	return newest, nil
 }
 
 func ValidateVersion(version string) error {

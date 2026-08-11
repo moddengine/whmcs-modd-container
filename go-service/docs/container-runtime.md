@@ -49,8 +49,10 @@ work remains. While a phase is busy, another lifecycle request returns `409`.
 ## Container contract
 
 Only a locally available image named
-`<docker.image_repository>:<version>` can be started. The controller does not
-pull images.
+`<docker.image_repository>:<version>` can be started. Images are pulled only
+through `POST /v1/image/pull`; callers can supply a tag, but cannot override
+the configured repository. The endpoint queues the pull and returns `202`
+without waiting for the download.
 
 Every container has:
 

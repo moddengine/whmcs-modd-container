@@ -251,10 +251,14 @@ In WHMCS:
 7. Leave **Staging Domain** blank for automatic derivation.
 8. Activate **Modd Hosting** under addon modules and restrict it to trusted
    administrator roles.
+9. Set a unique **Docker Hub Webhook Token**, then copy the webhook URL from
+   the addon's **Docker images** page into the Docker Hub repository settings.
 
 The provisioning module creates, suspends, resumes, and displays services. The
 addon provides controller status, manual termination and deletion, upgrades,
 bulk upgrades, and the controller log.
+The Docker images page also pulls the latest stable `v*` tag or an exact
+PR/dev tag on every configured controller.
 
 ## Development
 

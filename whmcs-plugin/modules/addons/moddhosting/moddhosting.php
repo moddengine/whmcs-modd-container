@@ -21,6 +21,14 @@ function moddhosting_config(): array
         'version' => '1.0.0',
         'author' => 'MODD Pty Ltd',
         'language' => 'english',
+        'fields' => [
+            'webhookToken' => [
+                'FriendlyName' => 'Docker Hub Webhook Token',
+                'Type' => 'password',
+                'Size' => '64',
+                'Description' => 'Generate a unique token, for example with: openssl rand -hex 32',
+            ],
+        ],
     ];
 }
 
@@ -53,12 +61,123 @@ function moddhosting_output(array $vars): void
             'services' => moddhosting_services_page($vars),
             'service' => moddhosting_service_page($vars),
             'bulk' => moddhosting_bulk_page($vars),
+            'images' => moddhosting_images_page($vars),
             'log' => moddhosting_log_page(),
             default => moddhosting_overview_page(),
         };
     } catch (\Throwable $error) {
         echo '<div class="alert alert-danger">' . moddhosting_h($error->getMessage()) . '</div>';
     }
+}
+
+/** @param array<string, mixed> $vars */
+function moddhosting_images_page(array $vars): void
+{
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $action = (string) ($_POST['action'] ?? '');
+        $version = $action === 'pull-latest' ? '' : trim((string) ($_POST['version'] ?? ''));
+        if ($action !== 'pull-latest' && ($action !== 'pull-version' || !moddhosting_valid_version($version))) {
+            throw new \InvalidArgumentException('Enter a valid image version.');
+        }
+        moddhosting_render_pull_results(moddhosting_pull_all($version));
+    }
+    $token = trim((string) ($vars['webhookToken'] ?? ''));
+    echo '<h2>Docker images</h2>';
+    if ($token === '') {
+        echo '<div class="alert alert-warning">Set a Docker Hub Webhook Token in the addon configuration to enable the webhook URL.</div>';
+    } else {
+        $webhook = rtrim(\WHMCS\Config\Setting::getValue('SystemURL'), '/') . '/index.php?m=moddhosting&token=' . rawurlencode($token);
+        echo '<p>Docker Hub webhook URL:</p><pre>' . moddhosting_h($webhook) . '</pre>';
+    }
+    $formToken = moddhosting_h(generate_token('plain'));
+    echo '<form method="post" class="form-inline"><input type="hidden" name="token" value="' . $formToken . '">'
+        . '<input type="hidden" name="action" value="pull-latest"><button class="btn btn-primary">Pull latest v* on all controllers</button></form>'
+        . '<h3>Pull a PR/dev version</h3><form method="post" class="form-inline"><input type="hidden" name="token" value="' . $formToken . '">'
+        . '<input type="hidden" name="action" value="pull-version"><input class="form-control" name="version" maxlength="128" required placeholder="pr-123"> '
+        . '<button class="btn btn-default">Pull specific version on all controllers</button></form>';
+}
+
+/** @return list<array{server: string, version?: string, error?: string}> */
+function moddhosting_pull_all(string $version): array
+{
+    $servers = Capsule::table('tblservers')->where('type', 'moddhosting')->orderBy('id')->get();
+    $results = [];
+    foreach ($servers as $server) {
+        $name = trim((string) ($server->name ?? '')) ?: trim((string) ($server->hostname ?: $server->ipaddress));
+        try {
+            $pulled = moddhosting_client_from_server($server)->request('POST', '/v1/image/pull', ['version' => $version]);
+            $results[] = ['server' => $name, 'version' => (string) ($pulled['version'] ?? $version)];
+        } catch (\Throwable $error) {
+            $results[] = ['server' => $name, 'error' => $error->getMessage()];
+        }
+    }
+    if ($results === []) {
+        throw new \RuntimeException('No Modd Hosting servers are configured.');
+    }
+    return $results;
+}
+
+/** @param list<array{server: string, version?: string, error?: string}> $results */
+function moddhosting_render_pull_results(array $results): void
+{
+    echo '<h3>Pull results</h3><table class="table"><tbody>';
+    foreach ($results as $result) {
+        $error = $result['error'] ?? '';
+        echo '<tr><td>' . moddhosting_h($result['server']) . '</td><td class="' . ($error === '' ? 'text-success' : 'text-danger') . '">'
+            . moddhosting_h($error === '' ? 'Queued ' . ($result['version'] ?? '') : $error) . '</td></tr>';
+    }
+    echo '</tbody></table>';
+}
+
+function moddhosting_valid_version(string $version): bool
+{
+    return preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/D', $version) === 1;
+}
+
+/** @param array<string, mixed> $vars
+ * @return array<string, mixed>
+ */
+function moddhosting_clientarea(array $vars): array
+{
+    $status = 200;
+    $message = 'Image pull queued.';
+    $configured = trim((string) ($vars['webhookToken'] ?? ''));
+    $provided = (string) ($_GET['token'] ?? '');
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        $status = 405;
+        $message = 'POST required.';
+    } elseif ($configured === '' || !hash_equals($configured, $provided)) {
+        $status = 403;
+        $message = 'Invalid webhook token.';
+    } else {
+        try {
+            $payload = json_decode((string) file_get_contents('php://input'), true, 32, JSON_THROW_ON_ERROR);
+            $version = is_array($payload) ? (string) ($payload['push_data']['tag'] ?? '') : '';
+            if (!moddhosting_valid_version($version)) {
+                throw new \InvalidArgumentException('Docker Hub payload did not contain a valid tag.');
+            }
+            if (!str_starts_with($version, 'v')) {
+                $message = 'Non-v tag ignored.';
+            } else {
+                foreach (moddhosting_pull_all($version) as $result) {
+                    if (isset($result['error'])) {
+                        throw new \RuntimeException('One or more controllers failed to pull the image.');
+                    }
+                }
+            }
+        } catch (\Throwable $error) {
+            $status = 502;
+            $message = $error->getMessage();
+        }
+    }
+    http_response_code($status);
+    return [
+        'pagetitle' => 'Docker image webhook',
+        'templatefile' => 'webhook',
+        'requirelogin' => false,
+        'forcessl' => true,
+        'vars' => ['message' => $message],
+    ];
 }
 
 function moddhosting_overview_page(): void
@@ -286,7 +405,7 @@ function moddhosting_valid_id(string $id): string
 
 function moddhosting_nav(string $moduleLink): string
 {
-    $links = ['overview' => 'Overview', 'services' => 'Services', 'bulk' => 'Bulk upgrades', 'log' => 'Controller log'];
+    $links = ['overview' => 'Overview', 'services' => 'Services', 'bulk' => 'Bulk upgrades', 'images' => 'Docker images', 'log' => 'Controller log'];
     $html = '<p>';
     foreach ($links as $page => $label) {
         $html .= '<a class="btn btn-default" href="' . moddhosting_h($moduleLink . '&page=' . $page) . '">' . $label . '</a> ';

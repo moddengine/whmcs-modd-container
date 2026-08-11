@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,38 @@ import (
 	"github.com/moddengine/whmcs-container-controller/internal/isolation"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 )
+
+func TestPullLatestStableImage(t *testing.T) {
+	page := 0
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page++
+		if page == 1 {
+			_, _ = io.WriteString(w, `{"next":"page-2","results":[{"name":"dev-9","tag_last_pushed":"2026-08-10T03:00:00Z"},{"name":"v2","tag_last_pushed":"2026-08-09T03:00:00Z"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"next":null,"results":[{"name":"v3","tag_last_pushed":"2026-08-10T02:00:00Z"}]}`)
+	}))
+	defer hub.Close()
+	version, err := latestHubVersion(t.Context(), hub.Client(), hub.URL, "moddengine/whmcs")
+	if err != nil || version != "v3" || page != 2 {
+		t.Fatalf("latestHubVersion() = %q after %d pages: %v", version, page, err)
+	}
+
+	var pulledImage, pulledTag string
+	dockerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pulledImage, pulledTag = r.URL.Query().Get("fromImage"), r.URL.Query().Get("tag")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "downloaded"})
+	}))
+	defer dockerAPI.Close()
+	client, err := client.NewClientWithOpts(client.WithHost(dockerAPI.URL), client.WithHTTPClient(dockerAPI.Client()), client.WithVersion("1.52"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pulled, err := (&Adapter{client: client, cfg: config.Docker{ImageRepository: "moddengine/whmcs"}}).Pull(t.Context(), "pr-123")
+	if err != nil || pulled.Version != "pr-123" || pulledImage != "docker.io/moddengine/whmcs" || pulledTag != "pr-123" {
+		t.Fatalf("Pull() = %#v, image=%q tag=%q: %v", pulled, pulledImage, pulledTag, err)
+	}
+}
 
 func TestStopAllReconcilesEveryContainerState(t *testing.T) {
 	stopped := 0

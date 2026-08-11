@@ -42,6 +42,9 @@ namespace WHMCS\Database {
         public function select(string ...$columns): self {}
 
         public function first(): ?\stdClass {}
+
+        /** @return iterable<\stdClass> */
+        public function get(): iterable {}
     }
 }
 

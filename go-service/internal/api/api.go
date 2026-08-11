@@ -25,6 +25,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
+	dockeradapter "github.com/moddengine/whmcs-container-controller/internal/docker"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 	"github.com/moddengine/whmcs-container-controller/internal/service"
 	"github.com/moddengine/whmcs-container-controller/internal/state"
@@ -48,6 +49,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/health", a.health)
 	mux.HandleFunc("GET /v1/info", a.info)
 	mux.HandleFunc("GET /v1/image/versions", a.versions)
+	mux.HandleFunc("POST /v1/image/pull", a.pullImage)
 	mux.HandleFunc("GET /v1/log", a.log)
 	mux.HandleFunc("GET /v1/services", a.list)
 	mux.HandleFunc("PUT /v1/services/{id}", a.provision)
@@ -97,6 +99,37 @@ func (a *API) versions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
+}
+
+func (a *API) pullImage(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Version string `json:"version"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
+		return
+	}
+	version := strings.TrimSpace(request.Version)
+	if version != "" {
+		if err := dockeradapter.ValidateVersion(version); err != nil {
+			a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
+			return
+		}
+	}
+	requestID := requestID(r)
+	go func() {
+		pulled, err := a.Manager.Docker.Pull(context.Background(), version)
+		if err != nil {
+			a.Logger.Error("image pull failed", "request_id", requestID, "version", version, "error", err)
+			return
+		}
+		a.Logger.Info("image pull completed", "request_id", requestID, "version", pulled.Version)
+	}()
+	queued := version
+	if queued == "" {
+		queued = "latest v*"
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "version": queued})
 }
 
 func (a *API) log(w http.ResponseWriter, r *http.Request) {

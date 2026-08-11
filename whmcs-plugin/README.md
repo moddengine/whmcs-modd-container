@@ -14,6 +14,12 @@ controller with the most recent image first. Save the service before running
 Create. Activate the `Modd Hosting` addon and grant access only to administrator
 roles that may perform hosting lifecycle actions.
 
+Set the addon's **Docker Hub Webhook Token** to a unique value such as the
+output of `openssl rand -hex 32`. The Docker images page shows the URL to add
+as a Docker Hub repository webhook. Stable `v*` pushes are pulled by every
+configured controller; other pushed tags are ignored. The same page can pull
+the latest stable tag or an exact PR/dev tag manually.
+
 Automatic WHMCS termination intentionally returns an error. Termination,
 permanent deletion, upgrades, bulk upgrades, status, and controller logs live
 in **Addons > Modd Hosting**.

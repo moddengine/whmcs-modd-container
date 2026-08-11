@@ -51,6 +51,34 @@ paths:
                     items: { $ref: "#/components/schemas/ImageVersion" }
                 required: [versions]
         "401": { $ref: "#/components/responses/Error" }
+  /v1/image/pull:
+    post:
+      summary: Pull an image from Docker Hub
+      description: An empty version resolves and pulls the most recently pushed tag starting with v.
+      operationId: pullImage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version: { type: string, description: Exact tag to pull; empty selects the latest v tag }
+              required: [version]
+            example: { version: pr-123 }
+      responses:
+        "202":
+          description: Image pull queued; completion or failure is written to the controller log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: queued }
+                  version: { type: string }
+                required: [status, version]
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
   /v1/log:
     get:
       summary: Read the controller log tail
