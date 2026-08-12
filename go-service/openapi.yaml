@@ -136,6 +136,7 @@ paths:
             schema: { $ref: "#/components/schemas/ProvisionRequest" }
             example:
               main_domain: mysite.com
+              public_ipv4: 203.0.113.10
               version: v21.6.24
               display_name: My site
       responses:
@@ -252,9 +253,10 @@ components:
       properties:
         main_domain: { type: string, format: hostname }
         staging_domain: { type: string, format: hostname }
+        public_ipv4: { type: string, format: ipv4 }
         version: { type: string, minLength: 1 }
         display_name: { type: string }
-      required: [main_domain, version]
+      required: [main_domain, public_ipv4, version]
     UpgradeRequest:
       type: object
       additionalProperties: false
@@ -277,6 +279,7 @@ components:
         state: { type: string, enum: [active, suspended, terminated, deleted] }
         main_domain: { type: string }
         staging_domain: { type: string }
+        public_ipv4: { type: string, format: ipv4 }
         version: { type: string }
         live_deploy: { type: string, enum: [blue, green] }
         phase: { type: string, enum: [provisioning, starting, waiting_for_health, routing, draining, running, stopping, stopped, deleting, deleted, failed] }
@@ -285,6 +288,10 @@ components:
         target_version: { type: string }
         target_main_domain: { type: string, format: hostname }
         target_staging_domain: { type: string, format: hostname }
+        target_public_ipv4: { type: string, format: ipv4 }
+        dns_status: { type: string, enum: [pending, in_sync, error] }
+        dns_last_error: { type: string }
+        dns_synced_at: { type: string, format: date-time }
         message: { type: string }
         deployments:
           type: object
@@ -296,7 +303,7 @@ components:
         containers: { type: array, items: { type: object } }
         metrics: { type: object }
         warnings: { type: array, items: { type: string } }
-      required: [id, state, phase, main_domain, staging_domain, version, live_deploy, message, deployments, warnings]
+      required: [id, state, phase, main_domain, staging_domain, public_ipv4, version, live_deploy, message, deployments, warnings]
     DeploymentStatus:
       type: object
       properties:
@@ -332,6 +339,9 @@ components:
         live_deploy: { type: string, enum: [blue, green] }
         target_deploy: { type: string, enum: [blue, green] }
         target_version: { type: string }
+        dns_status: { type: string, enum: [pending, in_sync, error] }
+        dns_last_error: { type: string }
+        dns_synced_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         message: { type: string }
         deployments:

@@ -1,10 +1,17 @@
 package service
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/netip"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -51,7 +58,9 @@ type Manager struct {
 	Notify  notify.Notifier
 	Logger  *slog.Logger
 	// ponytail: serialize lifecycle writes; switch to per-service locks only if parallel upgrades are needed.
-	mu sync.Mutex
+	mu            sync.Mutex
+	dnsBackoffs   []time.Duration
+	dnsHTTPClient *http.Client
 }
 
 func ValidateServiceID(id string) error {
@@ -86,6 +95,14 @@ func DeriveStaging(domain, suffix string) (string, error) {
 	return NormalizeDomain(strings.ReplaceAll(domain, ".", "-") + "." + suffix)
 }
 
+func NormalizePublicIPv4(value string) (string, error) {
+	ip, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !ip.Is4() {
+		return "", errors.New("public_ipv4 must be an IPv4 address")
+	}
+	return ip.String(), nil
+}
+
 func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionRequest, requestID string) (*model.Status, bool, error) {
 	if err := ValidateServiceID(id); err != nil {
 		return nil, false, badRequest(err)
@@ -103,6 +120,10 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	if err != nil {
 		return nil, false, badRequest(err)
 	}
+	publicIPv4, err := NormalizePublicIPv4(req.PublicIPv4)
+	if err != nil {
+		return nil, false, badRequest(err)
+	}
 	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
 		return nil, false, badRequest(err)
 	}
@@ -117,8 +138,8 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 		derive(&existing)
 	}
 	m.mu.Unlock()
-	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.Version == req.Version) {
-		return m.reconcile(ctx, id, mainDomain, stagingDomain, req.Version, requestID)
+	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.PublicIPv4 == publicIPv4 && existing.Version == req.Version) {
+		return m.reconcile(ctx, id, mainDomain, stagingDomain, publicIPv4, req.Version, requestID)
 	}
 	if existingErr != nil && !errors.Is(existingErr, state.ErrNotFound) {
 		return nil, false, internal(existingErr)
@@ -133,7 +154,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	m.mu.Lock()
 	var retry *model.Service
 	if existing, err := m.Repo.Get(id); err == nil {
-		if existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.Version == req.Version {
+		if existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.PublicIPv4 == publicIPv4 && existing.Version == req.Version {
 			derive(&existing)
 			if existing.Phase == "running" {
 				m.mu.Unlock()
@@ -165,7 +186,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	} else {
 		now := time.Now().UTC()
 		service = model.Service{
-			ID: id, State: model.Active, MainDomain: mainDomain, StagingDomain: stagingDomain,
+			ID: id, State: model.Active, MainDomain: mainDomain, StagingDomain: stagingDomain, PublicIPv4: publicIPv4,
 			DisplayName: req.DisplayName, Version: req.Version, LiveDeploy: "blue", Phase: "provisioning", Operation: "provision", TargetDeploy: "blue", TargetVersion: req.Version,
 			CreatedAt: now, UpdatedAt: now,
 			Dataset: model.DatasetRecord{Name: m.ZFS.Dataset(id), Mountpoint: m.ZFS.Mountpoint(id)},
@@ -174,6 +195,9 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 				"blue":  deployment(m.Config.Deployment.Socket, id, "blue", req.Version),
 				"green": deployment(m.Config.Deployment.Socket, id, "green", ""),
 			},
+		}
+		if m.dnsEnabled() {
+			service.DNSStatus = "pending"
 		}
 		if err := m.Repo.Put(service); err != nil {
 			m.mu.Unlock()
@@ -223,7 +247,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	return status, true, err
 }
 
-func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, version, requestID string) (*model.Status, bool, error) {
+func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, publicIPv4, version, requestID string) (*model.Status, bool, error) {
 	m.mu.Lock()
 	service, err := m.liveService(id)
 	if err != nil {
@@ -232,12 +256,12 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 	}
 	derive(&service)
 	state, phase := service.State, service.Phase
-	sameDomains, sameVersion := service.MainDomain == mainDomain && service.StagingDomain == stagingDomain, service.Version == version
+	sameVersion := service.Version == version
 	m.mu.Unlock()
 
 	if state == model.Active {
 		if !sameVersion {
-			return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain)
+			return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4)
 		}
 		if phase != "running" {
 			return nil, false, conflict(fmt.Errorf("cannot deploy hostname while service is %s", phase))
@@ -249,15 +273,11 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 	} else {
 		return nil, false, conflict(fmt.Errorf("cannot deploy hostname for %s service", state))
 	}
-	if sameDomains {
-		status, statusErr := m.status(ctx, service)
-		return status, false, statusErr
-	}
-	return m.changeDomains(ctx, id, mainDomain, stagingDomain)
+	return m.changeDomains(ctx, id, mainDomain, stagingDomain, publicIPv4)
 }
 
-func (m *Manager) changeDomains(ctx context.Context, id, mainDomain, stagingDomain string) (*model.Status, bool, error) {
-	service, err := m.deployDomains(ctx, id, mainDomain, stagingDomain)
+func (m *Manager) changeDomains(ctx context.Context, id, mainDomain, stagingDomain, publicIPv4 string) (*model.Status, bool, error) {
+	service, err := m.deployDomains(ctx, id, mainDomain, stagingDomain, publicIPv4)
 	if err != nil {
 		return nil, false, err
 	}
@@ -265,7 +285,7 @@ func (m *Manager) changeDomains(ctx context.Context, id, mainDomain, stagingDoma
 	return status, false, statusErr
 }
 
-func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDomain string) (model.Service, error) {
+func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDomain string, requestedIPv4 ...string) (model.Service, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	service, err := m.liveService(id)
@@ -273,8 +293,10 @@ func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDoma
 		return service, err
 	}
 	derive(&service)
-	if service.MainDomain == mainDomain && service.StagingDomain == stagingDomain {
-		return service, nil
+	publicIPv4 := service.PublicIPv4
+	queueDNS := len(requestedIPv4) != 0 && m.dnsEnabled()
+	if queueDNS {
+		publicIPv4 = requestedIPv4[0]
 	}
 	oldDomains := domains(service)
 	apply := m.Caddy.Active
@@ -285,15 +307,26 @@ func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDoma
 	} else if service.State != model.Active || service.Phase != "running" {
 		return service, conflict(fmt.Errorf("cannot deploy hostname while service is %s", service.Phase))
 	}
-	if err := apply(ctx, id, []string{mainDomain, stagingDomain}, service.LiveDeploy); err != nil {
-		return service, unprocessable("hostname_change_failed", err)
+	domainsChanged := service.MainDomain != mainDomain || service.StagingDomain != stagingDomain
+	if domainsChanged {
+		if err := apply(ctx, id, []string{mainDomain, stagingDomain}, service.LiveDeploy); err != nil {
+			return service, unprocessable("hostname_change_failed", err)
+		}
 	}
-	service.MainDomain, service.StagingDomain, service.UpdatedAt = mainDomain, stagingDomain, time.Now().UTC()
+	service.MainDomain, service.StagingDomain, service.PublicIPv4, service.UpdatedAt = mainDomain, stagingDomain, publicIPv4, time.Now().UTC()
+	if queueDNS {
+		service.DNSStatus, service.DNSLastError = "pending", ""
+	}
 	if err := m.Repo.Put(service); err != nil {
-		if rollbackErr := apply(ctx, id, oldDomains, service.LiveDeploy); rollbackErr != nil {
-			return service, internal(fmt.Errorf("persist hostname change: %w; Caddy rollback failed: %v", err, rollbackErr))
+		if domainsChanged {
+			if rollbackErr := apply(ctx, id, oldDomains, service.LiveDeploy); rollbackErr != nil {
+				return service, internal(fmt.Errorf("persist hostname change: %w; Caddy rollback failed: %v", err, rollbackErr))
+			}
 		}
 		return service, internal(fmt.Errorf("persist hostname change: %w", err))
+	}
+	if queueDNS {
+		go m.syncDNS(id, mainDomain, publicIPv4)
 	}
 	return service, nil
 }
@@ -312,6 +345,10 @@ func (m *Manager) Resume(ctx context.Context, id, requestID string) (*model.Stat
 	derive(&service)
 	if service.State == model.Active && service.Phase == "running" {
 		m.mu.Unlock()
+		service, err = m.queueDNS(service)
+		if err != nil {
+			return nil, false, internal(err)
+		}
 		status, err := m.status(ctx, service)
 		return status, false, err
 	}
@@ -501,10 +538,10 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) (*model.Tomb
 }
 
 func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID string) (*model.Status, bool, error) {
-	return m.upgrade(ctx, id, req, requestID, "", "")
+	return m.upgrade(ctx, id, req, requestID, "", "", "")
 }
 
-func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID, targetMainDomain, targetStagingDomain string) (*model.Status, bool, error) {
+func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID, targetMainDomain, targetStagingDomain, targetPublicIPv4 string) (*model.Status, bool, error) {
 	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
 		return nil, false, badRequest(err)
 	}
@@ -521,6 +558,10 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		return nil, false, validationErr
 	}
 	if done {
+		service, err = m.queueDNS(service)
+		if err != nil {
+			return nil, false, internal(err)
+		}
 		status, err := m.status(ctx, service)
 		return status, false, err
 	}
@@ -545,12 +586,17 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 	}
 	if done {
 		m.mu.Unlock()
+		service, err = m.queueDNS(service)
+		if err != nil {
+			return nil, false, internal(err)
+		}
 		status, err := m.status(ctx, service)
 		return status, false, err
 	}
 	target := opposite(service.LiveDeploy)
 	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.UpdatedAt = "starting", "upgrade", target, req.Version, time.Now().UTC()
 	service.TargetMainDomain, service.TargetStagingDomain = targetMainDomain, targetStagingDomain
+	service.TargetPublicIPv4 = targetPublicIPv4
 	service.Deploy[target] = deployment(m.Config.Deployment.Socket, id, target, req.Version)
 	if err := m.Repo.Put(service); err != nil {
 		m.mu.Unlock()
@@ -643,6 +689,9 @@ func (m *Manager) finishHealth(id, operation, requestID string) {
 			service.MainDomain, service.StagingDomain = service.TargetMainDomain, service.TargetStagingDomain
 			service.TargetMainDomain, service.TargetStagingDomain = "", ""
 		}
+		if service.TargetPublicIPv4 != "" {
+			service.PublicIPv4, service.TargetPublicIPv4 = service.TargetPublicIPv4, ""
+		}
 		service.Phase, service.UpdatedAt = "draining", time.Now().UTC()
 		m.putDeferred(service)
 		if err := cleanupOldDeploy(context.Background(), m.Config.Deployment.TrafficDrain, func(ctx context.Context) error {
@@ -653,8 +702,14 @@ func (m *Manager) finishHealth(id, operation, requestID string) {
 		}
 		service.LiveDeploy, service.Version = target, service.TargetVersion
 	}
-	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.LastError, service.UpdatedAt = "running", "", "", "", "", "", "", time.Now().UTC()
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.TargetPublicIPv4, service.LastError, service.UpdatedAt = "running", "", "", "", "", "", "", "", time.Now().UTC()
+	if m.dnsEnabled() {
+		service.DNSStatus, service.DNSLastError = "pending", ""
+	}
 	m.putDeferred(service)
+	if m.dnsEnabled() {
+		go m.syncDNS(id, service.MainDomain, service.PublicIPv4)
+	}
 	m.notifyAsync(operation, true, service, requestID, "")
 }
 
@@ -730,6 +785,101 @@ func (m *Manager) notifyAsync(operation string, success bool, service model.Serv
 			m.Logger.Warn("notification failed", "operation", operation, "service_id", service.ID, "request_id", requestID, "error", err)
 		}
 	}()
+}
+
+func (m *Manager) queueDNS(service model.Service) (model.Service, error) {
+	if !m.dnsEnabled() {
+		return service, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	latest, err := m.Repo.Get(service.ID)
+	if err != nil {
+		return service, err
+	}
+	latest.DNSStatus, latest.DNSLastError, latest.UpdatedAt = "pending", "", time.Now().UTC()
+	if err := m.Repo.Put(latest); err != nil {
+		return service, err
+	}
+	go m.syncDNS(latest.ID, latest.MainDomain, latest.PublicIPv4)
+	return latest, nil
+}
+
+func (m *Manager) dnsEnabled() bool { return m.Config.DNSWebhook.URL != "" }
+
+func (m *Manager) syncDNS(id, domain, publicIPv4 string) {
+	backoffs := m.dnsBackoffs
+	if backoffs == nil {
+		backoffs = []time.Duration{0, 30 * time.Second, 5 * time.Minute}
+	}
+	var err error
+	for _, backoff := range backoffs {
+		if backoff > 0 {
+			time.Sleep(backoff)
+		}
+		err = m.callDNSWebhook(domain, publicIPv4)
+		if err == nil {
+			break
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	service, getErr := m.Repo.Get(id)
+	if getErr != nil || service.MainDomain != domain || service.PublicIPv4 != publicIPv4 || err != nil && service.DNSStatus != "pending" {
+		return
+	}
+	service.UpdatedAt = time.Now().UTC()
+	if err == nil {
+		service.DNSStatus, service.DNSLastError, service.DNSSyncedAt = "in_sync", "", service.UpdatedAt.Format(time.RFC3339Nano)
+	} else {
+		service.DNSStatus, service.DNSLastError = "error", err.Error()
+	}
+	if putErr := m.Repo.Put(service); putErr != nil && m.Logger != nil {
+		m.Logger.Error("persist DNS status", "service_id", id, "error", putErr)
+	}
+}
+
+func (m *Manager) callDNSWebhook(domain, publicIPv4 string) error {
+	rendered := strings.NewReplacer("{domain}", jsonString(domain), "{ipv4}", jsonString(publicIPv4)).Replace(m.Config.DNSWebhook.Body)
+	headerBlock, body, ok := strings.Cut(strings.ReplaceAll(rendered, "\r\n", "\n"), "\n\n")
+	if !ok {
+		return errors.New("dns_webhook.body must separate headers and content with a blank line")
+	}
+	headers, err := textproto.NewReader(bufio.NewReader(strings.NewReader(headerBlock + "\n\n"))).ReadMIMEHeader()
+	if err != nil {
+		return fmt.Errorf("parse dns_webhook.body headers: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.Config.DNSWebhook.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.Config.DNSWebhook.URL, bytes.NewBufferString(body))
+	if err != nil {
+		return err
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
+	client := m.dnsHTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("DNS webhook returned %s", response.Status)
+	}
+	return nil
+}
+
+func jsonString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded[1 : len(encoded)-1])
 }
 
 func (m *Manager) RecoverInterrupted() error {
@@ -845,11 +995,15 @@ func (m *Manager) MonitorSnapshot(ctx context.Context, id string) (model.Monitor
 				ReceivesTraffic: configured && mode == "proxy" && socket == m.Caddy.Socket(id, slot),
 			}
 		}
-		return model.MonitorSnapshot{Type: "status", ObservedAt: time.Now().UTC(), Service: map[string]any{
+		snapshot := map[string]any{
 			"id": service.ID, "state": service.State, "phase": service.Phase, "operation": service.Operation,
 			"live_deploy": service.LiveDeploy, "target_deploy": service.TargetDeploy, "target_version": service.TargetVersion,
 			"updated_at": service.UpdatedAt, "message": phaseMessage(service.Phase, service.TargetDeploy, service.LiveDeploy), "deployments": deployments,
-		}}, false, nil
+		}
+		if service.DNSStatus != "" {
+			snapshot["dns_status"], snapshot["dns_last_error"], snapshot["dns_synced_at"] = service.DNSStatus, service.DNSLastError, service.DNSSyncedAt
+		}
+		return model.MonitorSnapshot{Type: "status", ObservedAt: time.Now().UTC(), Service: snapshot}, false, nil
 	}
 	if !errors.Is(err, state.ErrNotFound) {
 		return model.MonitorSnapshot{}, false, internal(err)

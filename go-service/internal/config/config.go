@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ type Config struct {
 	Docker     Docker     `toml:"docker"`
 	Deployment Deployment `toml:"deployment"`
 	Domains    Domains    `toml:"domains"`
+	DNSWebhook DNSWebhook `toml:"dns_webhook"`
 	GoogleChat GoogleChat `toml:"google_chat"`
 	Logging    Logging    `toml:"logging"`
 }
@@ -71,6 +73,12 @@ type Deployment struct {
 type Domains struct {
 	StagingSuffix string `toml:"staging_suffix"`
 }
+type DNSWebhook struct {
+	URL        string        `toml:"url"`
+	Body       string        `toml:"body"`
+	Timeout    time.Duration `toml:"-"`
+	TimeoutRaw string        `toml:"timeout"`
+}
 type GoogleChat struct {
 	WebhookURLFile string `toml:"webhook_url_file"`
 }
@@ -96,6 +104,12 @@ func Load(path string) (Config, error) {
 		{c.Deployment.HealthInitialRaw, &c.Deployment.HealthInitialDelay},
 		{c.Deployment.HealthBackoffRaw, &c.Deployment.HealthBackoff},
 		{c.Deployment.TrafficDrainRaw, &c.Deployment.TrafficDrain},
+	}
+	if c.DNSWebhook.URL != "" {
+		durations = append(durations, struct {
+			raw string
+			dst *time.Duration
+		}{c.DNSWebhook.TimeoutRaw, &c.DNSWebhook.Timeout})
 	}
 	for _, item := range durations {
 		if *item.dst, err = time.ParseDuration(item.raw); err != nil {
@@ -139,6 +153,17 @@ func (c Config) Validate() error {
 	}
 	if c.Domains.StagingSuffix == "" {
 		return errors.New("domains.staging_suffix is required")
+	}
+	if c.DNSWebhook.URL != "" {
+		if c.DNSWebhook.Body == "" || c.DNSWebhook.Timeout <= 0 {
+			return errors.New("dns_webhook body and positive timeout are required when url is configured")
+		}
+		if webhookURL, err := url.ParseRequestURI(c.DNSWebhook.URL); err != nil || webhookURL.Scheme != "http" && webhookURL.Scheme != "https" || webhookURL.Host == "" {
+			return errors.New("dns_webhook.url must be an HTTP(S) URL")
+		}
+		if !strings.Contains(c.DNSWebhook.Body, "{domain}") || !strings.Contains(c.DNSWebhook.Body, "{ipv4}") {
+			return errors.New("dns_webhook.body must contain {domain} and {ipv4}")
+		}
 	}
 	if c.Caddy.ActiveTemplate == "" {
 		return errors.New("caddy.active_template is required")

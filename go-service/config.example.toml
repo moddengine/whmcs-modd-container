@@ -48,6 +48,17 @@ socket = "/run/whmcs/{service_id}-{slot}/http.sock"
 [domains]
 staging_suffix = "staging.com"
 
+# Omit this section or leave url empty to disable DNS updates.
+[dns_webhook]
+url = "https://whmcs.example/modules/addons/whmcs_dns/website.php"
+body = '''
+Authorization: Bearer abcde...789
+Content-Type: application/json
+
+{"domain":"{domain}", "ipv4":"{ipv4}"}
+'''
+timeout = "30s"
+
 [google_chat]
 webhook_url_file = "/etc/modd-hosting/google-chat-url"
 

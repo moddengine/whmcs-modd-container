@@ -1,18 +1,30 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/moddengine/whmcs-container-controller/internal/caddy"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
+	"github.com/moddengine/whmcs-container-controller/internal/healthcheck"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
+	"github.com/moddengine/whmcs-container-controller/internal/notify"
 	"github.com/moddengine/whmcs-container-controller/internal/state"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return fn(request) }
 
 func TestDeployDomainsReplacesRoutesAndPersistsState(t *testing.T) {
 	root := t.TempDir()
@@ -182,6 +194,14 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 			t.Fatalf("NormalizeDomain(%q) accepted invalid input", invalid)
 		}
 	}
+	if ip, err := NormalizePublicIPv4(" 203.0.113.10 "); err != nil || ip != "203.0.113.10" {
+		t.Fatalf("NormalizePublicIPv4() = %q, %v", ip, err)
+	}
+	for _, invalid := range []string{"", "2001:db8::1", "999.0.0.1"} {
+		if _, err := NormalizePublicIPv4(invalid); err == nil {
+			t.Fatalf("NormalizePublicIPv4(%q) accepted invalid input", invalid)
+		}
+	}
 	if comparison, ordered := compareVersions("v21.6.23", "v21.6.24"); !ordered || comparison >= 0 {
 		t.Fatal("numeric downgrade was not detected")
 	}
@@ -191,6 +211,189 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 	if _, err := validateUpgrade(model.Service{State: model.Active, Phase: "running", Version: "v2"}, model.UpgradeRequest{Version: "v1"}); err == nil {
 		t.Fatal("Create-style upgrade accepted a downgrade without confirmation")
 	}
+}
+
+func TestProvisionRejectsInvalidPublicIPv4(t *testing.T) {
+	manager := Manager{Config: config.Config{Domains: config.Domains{StagingSuffix: "staging.test"}}}
+	_, _, err := manager.Provision(t.Context(), "whmcs-123", model.ProvisionRequest{
+		MainDomain: "example.com", PublicIPv4: "2001:db8::1", Version: "v1",
+	}, "request-1")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest {
+		t.Fatalf("Provision() error = %v", err)
+	}
+}
+
+func TestDNSWebhookRendersJSONEscapedValues(t *testing.T) {
+	var gotBody, gotAuthorization string
+	manager := Manager{
+		Config: config.Config{DNSWebhook: config.DNSWebhook{
+			URL: "https://dns.example/hook", Timeout: time.Second,
+			Body: "Authorization: Bearer token\nContent-Type: application/json\n\n{\"domain\":\"{domain}\",\"ipv4\":\"{ipv4}\"}",
+		}},
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(request.Body)
+			gotBody, gotAuthorization = string(body), request.Header.Get("Authorization")
+			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		})},
+	}
+	if err := manager.callDNSWebhook("quote\".example", "line\nfeed"); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuthorization != "Bearer token" || gotBody != `{"domain":"quote\".example","ipv4":"line\nfeed"}` {
+		t.Fatalf("headers/body = %q / %q", gotAuthorization, gotBody)
+	}
+}
+
+func TestDisabledDNSSkipsQueue(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{ID: "whmcs-123", MainDomain: "example.com", PublicIPv4: "203.0.113.10"}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Repo: repo}
+	got, err := manager.queueDNS(service)
+	if err != nil || got.DNSStatus != "" {
+		t.Fatalf("disabled DNS queue = %#v, %v", got, err)
+	}
+}
+
+func TestDNSFailureDoesNotChangeRunningWorkload(t *testing.T) {
+	repo := state.New(filepath.Join(t.TempDir(), "services"), filepath.Join(t.TempDir(), "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{ID: "whmcs-123", State: model.Active, Phase: "running", MainDomain: "example.com", PublicIPv4: "203.0.113.10", DNSStatus: "pending"}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{
+		Repo: repo, dnsBackoffs: []time.Duration{0},
+		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 500, Status: "500 Internal Server Error", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		})},
+	}
+	manager.syncDNS(service.ID, service.MainDomain, service.PublicIPv4)
+	got, err := repo.Get(service.ID)
+	if err != nil || got.DNSStatus != "error" || got.DNSLastError == "" || got.State != model.Active || got.Phase != "running" {
+		t.Fatalf("service after DNS failure = %#v, %v", got, err)
+	}
+	got.DNSStatus = "pending"
+	if err := repo.Put(got); err != nil {
+		t.Fatal(err)
+	}
+	manager.Config.DNSWebhook.Timeout = time.Millisecond
+	manager.dnsHTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	manager.syncDNS(service.ID, service.MainDomain, service.PublicIPv4)
+	got, _ = repo.Get(service.ID)
+	if got.DNSStatus != "error" || !strings.Contains(got.DNSLastError, "deadline exceeded") || got.Phase != "running" {
+		t.Fatalf("service after DNS timeout = %#v", got)
+	}
+}
+
+func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{ID: "whmcs-123", State: model.Active, Phase: "running", MainDomain: "example.com", PublicIPv4: "203.0.113.10", DNSStatus: "error"}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	manager := Manager{
+		Repo: repo, dnsBackoffs: []time.Duration{0, 0, 0},
+		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			status := 500
+			if calls.Add(1) >= 3 {
+				status = 204
+			}
+			return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		})},
+	}
+	if _, err := manager.queueDNS(service); err != nil {
+		t.Fatal(err)
+	}
+	synced := false
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		got, _ := repo.Get(service.ID)
+		if got.DNSStatus == "in_sync" {
+			if calls.Load() != 3 || got.DNSSyncedAt == "" {
+				t.Fatalf("calls/status = %d / %#v", calls.Load(), got)
+			}
+			synced = true
+			break
+		}
+	}
+	if !synced {
+		t.Fatal("asynchronous DNS result was not persisted")
+	}
+	latest, _ := repo.Get(service.ID)
+	if _, err := manager.queueDNS(latest); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		latest, _ = repo.Get(service.ID)
+		if calls.Load() == 4 && latest.DNSStatus == "in_sync" {
+			break
+		}
+	}
+	if calls.Load() != 4 || latest.DNSStatus != "in_sync" {
+		t.Fatalf("successful DNS deployment was not safely repeated: calls=%d service=%#v", calls.Load(), latest)
+	}
+}
+
+func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "health.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })}
+	go server.Serve(listener)
+	t.Cleanup(func() { _ = server.Close() })
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{
+		ID: "whmcs-123", State: model.Active, Phase: "waiting_for_health", Operation: "provision", TargetDeploy: "blue", LiveDeploy: "blue",
+		MainDomain: "example.com", StagingDomain: "example.staging.test", PublicIPv4: "203.0.113.10", DNSStatus: "pending",
+		Deploy: map[string]model.Deploy{"blue": {Socket: socket, Health: "checking"}},
+	}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{
+		Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, dnsBackoffs: []time.Duration{0},
+		Caddy:  caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		})},
+	}
+	manager.finishHealth(service.ID, "provision", "request-1")
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		got, _ := repo.Get(service.ID)
+		if got.DNSStatus == "in_sync" {
+			if got.Phase != "running" || got.Deploy["blue"].Health != "healthy" || got.DNSSyncedAt == "" {
+				t.Fatalf("eventual service = %#v", got)
+			}
+			return
+		}
+	}
+	t.Fatal("initial asynchronous DNS result was not recorded")
 }
 
 func TestServiceID(t *testing.T) {

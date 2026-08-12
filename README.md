@@ -210,11 +210,17 @@ before changing mounts.
 | `deployment.traffic_drain` | Wait before removing the old deployment. |
 | `deployment.socket` | Host, container, and Caddy-visible Unix-socket path template; supports `{service_id}` and `{slot}`. |
 | `domains.staging_suffix` | Suffix used when WHMCS supplies no staging domain. |
+| `dns_webhook.url` | DNS update endpoint; omit or leave empty to disable updates. |
+| `dns_webhook.body` | HTTP headers, a blank line, and body template supporting `{domain}` and `{ipv4}`. |
+| `dns_webhook.timeout` | Timeout for each DNS update attempt. |
 
 For example, `example.com` with suffix `staging.com` becomes
 `example-com.staging.com`. A deployment is routed only after the health
 endpoint returns HTTP 2xx. Failed provision and upgrade artifacts remain in
 place for diagnosis.
+
+DNS updates run after healthy routing without blocking the site. Failures are
+recorded in service status and retried twice after 30 seconds and 5 minutes.
 
 ### Notifications and logging
 

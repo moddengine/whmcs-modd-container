@@ -38,6 +38,7 @@ function moddhosting_CreateAccount(array $params): string
         return moddhosting_call($params, 'PUT', '/v1/services/' . moddhosting_service_id($params), [
             'main_domain' => (string) $params['domain'],
             'staging_domain' => trim((string) ($params['configoption1'] ?? '')),
+			'public_ipv4' => trim((string) $params['serverip']),
             'version' => moddhosting_selected_version($params),
             'display_name' => 'WHMCS service ' . (int) $params['serviceid'],
         ]);

@@ -53,6 +53,9 @@ func main() {
 	}
 	defer logFile.Close()
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stderr, logFile), nil))
+	if cfg.DNSWebhook.URL == "" {
+		logger.Info("DNS update disabled; dns_webhook.url is empty")
+	}
 
 	repo := state.New(cfg.State.ServicesDir, cfg.State.TombstonesDir)
 	if err := repo.Init(); err != nil {
