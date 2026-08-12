@@ -79,22 +79,6 @@ paths:
                 required: [status, version]
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
-  /v1/log:
-    get:
-      summary: Read the controller log tail
-      operationId: daemonLog
-      responses:
-        "200":
-          description: Last 250 daemon log lines
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  lines: { type: array, items: { type: string } }
-                  limit: { type: integer, const: 250 }
-                required: [lines, limit]
-        "401": { $ref: "#/components/responses/Error" }
   /v1/services:
     get:
       summary: List services and observed status

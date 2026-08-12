@@ -23,7 +23,7 @@ configured controller; other pushed tags are ignored. The same page can pull
 the latest stable tag or an exact PR/dev tag manually.
 
 Automatic WHMCS termination intentionally returns an error. Termination,
-permanent deletion, upgrades, bulk upgrades, status, and controller logs live
+permanent deletion, upgrades, bulk upgrades, and status live
 in **Addons > Modd Hosting**.
 
 Static analysis:

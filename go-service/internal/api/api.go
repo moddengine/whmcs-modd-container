@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -11,13 +10,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -50,7 +47,6 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/info", a.info)
 	mux.HandleFunc("GET /v1/image/versions", a.versions)
 	mux.HandleFunc("POST /v1/image/pull", a.pullImage)
-	mux.HandleFunc("GET /v1/log", a.log)
 	mux.HandleFunc("GET /v1/services", a.list)
 	mux.HandleFunc("PUT /v1/services/{id}", a.provision)
 	mux.HandleFunc("GET /v1/services/{id}", a.get)
@@ -130,15 +126,6 @@ func (a *API) pullImage(w http.ResponseWriter, r *http.Request) {
 		queued = "latest v*"
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "version": queued})
-}
-
-func (a *API) log(w http.ResponseWriter, r *http.Request) {
-	lines, err := Tail(a.Config.Logging.Path, 250, 1<<20)
-	if err != nil {
-		a.writeError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"lines": lines, "limit": 250})
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
@@ -448,39 +435,4 @@ func newRequestID() string {
 		return strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
 	return hex.EncodeToString(bytes[:])
-}
-
-func Tail(path string, lineLimit, byteLimit int) ([]string, error) {
-	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return []string{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	start := max(int64(0), info.Size()-int64(byteLimit))
-	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		return nil, err
-	}
-	scanner := bufio.NewScanner(io.LimitReader(file, int64(byteLimit)))
-	scanner.Buffer(make([]byte, 64*1024), 256*1024)
-	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read log: %w", err)
-	}
-	if start > 0 && len(lines) > 0 {
-		lines = lines[1:]
-	}
-	if len(lines) > lineLimit {
-		lines = lines[len(lines)-lineLimit:]
-	}
-	return lines, nil
 }

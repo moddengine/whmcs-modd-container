@@ -24,7 +24,6 @@ type Config struct {
 	Domains    Domains    `toml:"domains"`
 	DNSWebhook DNSWebhook `toml:"dns_webhook"`
 	GoogleChat GoogleChat `toml:"google_chat"`
-	Logging    Logging    `toml:"logging"`
 }
 
 type Server struct {
@@ -82,9 +81,6 @@ type DNSWebhook struct {
 type GoogleChat struct {
 	WebhookURLFile string `toml:"webhook_url_file"`
 }
-type Logging struct {
-	Path string `toml:"path"`
-}
 
 func Load(path string) (Config, error) {
 	var c Config
@@ -132,7 +128,7 @@ func (c Config) Validate() error {
 	for name, path := range map[string]string{
 		"zfs.mount_prefix": c.ZFS.MountPrefix, "state.services_dir": c.State.ServicesDir,
 		"state.tombstones_dir": c.State.TombstonesDir, "caddy.service_config_dir": c.Caddy.ServiceConfigDir,
-		"deployment.socket": c.Deployment.Socket, "logging.path": c.Logging.Path,
+		"deployment.socket": c.Deployment.Socket,
 	} {
 		if !filepath.IsAbs(path) {
 			return fmt.Errorf("%s must be absolute", name)

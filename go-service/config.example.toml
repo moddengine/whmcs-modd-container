@@ -61,6 +61,3 @@ timeout = "30s"
 
 [google_chat]
 webhook_url_file = "/etc/modd-hosting/google-chat-url"
-
-[logging]
-path = "/var/log/modd-hosting/controller.log"

@@ -332,8 +332,6 @@ Use the response's `X-Request-ID` to correlate the request with JSON logs:
 ```sh
 sudo systemctl status modd-hosting-controller
 sudo journalctl -u modd-hosting-controller --since '30 minutes ago'
-sudo tail -n 250 /var/log/modd-hosting/controller.log
-curl -sS -H 'Authorization: Bearer <token>' http://127.0.0.1:8443/v1/log
 ```
 
 Inspect the durable record before changing anything manually:

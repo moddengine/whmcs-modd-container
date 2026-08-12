@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,15 +43,7 @@ func main() {
 	if err != nil {
 		fatal(fmt.Errorf("read bearer token: %w", err))
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg.Logging.Path), 0750); err != nil {
-		fatal(err)
-	}
-	logFile, err := os.OpenFile(cfg.Logging.Path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
-	if err != nil {
-		fatal(err)
-	}
-	defer logFile.Close()
-	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stderr, logFile), nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	if cfg.DNSWebhook.URL == "" {
 		logger.Info("DNS update disabled; dns_webhook.url is empty")
 	}

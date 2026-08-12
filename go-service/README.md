@@ -12,7 +12,7 @@ depend on a build-host dynamic loader. If an existing binary reports
 `cannot execute: required file not found`, run `./build.sh check`; then rebuild
 it.
 
-Install the binary, `config.example.toml`, systemd unit, and logrotate file.
+Install the binary, `config.example.toml`, and systemd unit.
 Create the token with `openssl rand -hex 32`, restrict secret files to root,
 and expose the HTTP listener only to a Caddy proxy. Caddy must provide an HTTPS
 certificate trusted by the WHMCS host. Confirm the image's mounts against

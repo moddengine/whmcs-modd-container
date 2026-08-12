@@ -97,8 +97,7 @@ sudo chmod 0600 /etc/modd-hosting/api-token
 ```
 
 Review the configuration before starting the service. Install
-`go-service/packaging/modd-hosting-controller.service` as a systemd unit and
-`go-service/packaging/logrotate` under `/etc/logrotate.d/`.
+`go-service/packaging/modd-hosting-controller.service` as a systemd unit.
 
 Caddy must:
 
@@ -227,14 +226,12 @@ recorded in service status and retried twice after 30 seconds and 5 minutes.
 | Setting | Purpose |
 | --- | --- |
 | `google_chat.webhook_url_file` | File containing a Google Chat webhook URL. |
-| `logging.path` | JSON daemon log read by the API and WHMCS addon. |
 
 Set `webhook_url_file` to an empty string to disable notifications. An
 unreadable configured webhook disables notifications with a warning but does
 not stop the controller.
 
-Logs are written to stderr and `logging.path`. Rotation is handled by the
-supplied host logrotate configuration.
+JSON logs are written to stderr and captured by systemd's journal.
 
 ## Install and configure WHMCS
 
@@ -262,7 +259,7 @@ In WHMCS:
 
 The provisioning module creates, suspends, resumes, and displays services. The
 addon provides controller status, manual termination and deletion, upgrades,
-bulk upgrades, and the controller log.
+and bulk upgrades.
 The Docker images page also pulls the latest stable `v*` tag or an exact
 PR/dev tag on every configured controller.
 

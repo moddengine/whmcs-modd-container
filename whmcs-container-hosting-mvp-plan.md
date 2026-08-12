@@ -428,21 +428,6 @@ Allow an administrator to:
 
 Bulk execution should call the same per-service upgrade endpoint and should not introduce a separate bulk controller endpoint for MVP.
 
-#### Controller log page
-
-Call:
-
-```http
-GET /v1/log
-```
-
-Display the most recent 250 lines of controller daemon logs.
-
-Requirements:
-
-- Administrator-only.
-- Escape all output before rendering.
-- Never interpret log content as HTML.
 - No container logs.
 - No arbitrary file selection.
 - No query parameter allowing custom paths.
@@ -504,7 +489,6 @@ Required endpoints:
 GET    /v1/health
 GET    /v1/info
 GET    /v1/image/versions
-GET    /v1/log
 PUT    /v1/services/{id}
 POST   /v1/services/{id}/suspend
 POST   /v1/services/{id}/resume
@@ -555,19 +539,6 @@ Response should distinguish:
 - Optional created timestamp, when known
 
 Only images from the configured repository are permitted.
-
-#### `GET /v1/log`
-
-Return the most recent 250 daemon log lines.
-
-Suggested response:
-
-```json
-{
-  "lines": ["..."],
-  "limit": 250
-}
-```
 
 #### `PUT /v1/services/{id}`
 
@@ -718,8 +689,6 @@ provider = "mock"
 [google_chat]
 webhook_url_file = "/etc/modd-hosting/google-chat-url"
 
-[logging]
-path = "/var/log/modd-hosting/controller.log"
 level = "info"
 max_size_mb = 50
 max_backups = 10
@@ -1418,38 +1387,10 @@ Do not log:
 - File contents containing secrets.
 - Unbounded health response bodies.
 
-## 20.2 Log rotation
+Write structured logs to stderr. Under systemd, operators read and retain them
+through journald.
 
-Implement rotation using either:
-
-- In-process rotation library; or
-- Host `logrotate` configuration.
-
-Required behavior:
-
-- Configurable file size.
-- Configurable retained files.
-- Configurable retention age.
-- Compression of rotated files.
-- Safe reopen behavior.
-
-Default example:
-
-- 50 MB per file.
-- 10 backups.
-- 30 days.
-- Compression enabled.
-
-## 20.3 `GET /v1/log`
-
-- Read only the configured daemon log.
-- Return the most recent 250 lines.
-- Apply a maximum byte limit in addition to line count.
-- Handle a partially written final line.
-- Return an empty list when the file does not yet exist.
-- Do not permit path selection.
-
-## 20.4 Health and info
+## 20.2 Health and info
 
 `GET /v1/health` should stay shallow and fast.
 
@@ -2149,9 +2090,8 @@ The MVP is complete when:
 - Status is derived from TOML, Docker, ZFS, Caddy, and metrics.
 - WHMCS sync is read-only.
 - Image versions are available from `GET /v1/image/versions`.
-- Controller logs are available from `GET /v1/log` as the latest 250 lines.
 - Google Chat notifications are sent for the required lifecycle events.
-- Logs rotate and do not contain secrets.
+- Logs are written to stderr and do not contain secrets.
 - No feature depends on WHM, cPanel, Apache, `.htaccess`, `/home` paths, or Unix user switching.
 
 ---

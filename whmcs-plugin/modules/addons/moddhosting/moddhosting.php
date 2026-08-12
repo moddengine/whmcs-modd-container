@@ -62,7 +62,6 @@ function moddhosting_output(array $vars): void
             'service' => moddhosting_service_page($vars),
             'bulk' => moddhosting_bulk_page($vars),
             'images' => moddhosting_images_page($vars),
-            'log' => moddhosting_log_page(),
             default => moddhosting_overview_page(),
         };
     } catch (\Throwable $error) {
@@ -356,12 +355,6 @@ function moddhosting_bulk_page(array $vars): void
         . '<script>document.getElementById("bulk-search").addEventListener("input",function(){var q=this.value.trim().toLowerCase();document.querySelectorAll("#bulk-services tbody tr").forEach(function(row){row.hidden=!row.dataset.search.includes(q);});});</script>';
 }
 
-function moddhosting_log_page(): void
-{
-    $lines = moddhosting_addon_client()->request('GET', '/v1/log')['lines'] ?? [];
-    echo '<h2>Controller log</h2><pre>' . moddhosting_h(implode("\n", array_map('strval', $lines))) . '</pre>';
-}
-
 function moddhosting_addon_client(): ApiClient
 {
     $server = Capsule::table('tblservers')->where('type', 'moddhosting')->where('active', 1)->orderBy('id')->first();
@@ -405,7 +398,7 @@ function moddhosting_valid_id(string $id): string
 
 function moddhosting_nav(string $moduleLink): string
 {
-    $links = ['overview' => 'Overview', 'services' => 'Services', 'bulk' => 'Bulk upgrades', 'images' => 'Docker images', 'log' => 'Controller log'];
+    $links = ['overview' => 'Overview', 'services' => 'Services', 'bulk' => 'Bulk upgrades', 'images' => 'Docker images'];
     $html = '<p>';
     foreach ($links as $page => $label) {
         $html .= '<a class="btn btn-default" href="' . moddhosting_h($moduleLink . '&page=' . $page) . '">' . $label . '</a> ';
