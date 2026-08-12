@@ -11,8 +11,10 @@ Create a WHMCS server using module `Modd Container Hosting`:
 
 Choose the image version on each service's admin page; choices come from the
 controller with the most recent image first. Save the service before running
-Create. Activate the `Modd Hosting` addon and grant access only to administrator
-roles that may perform hosting lifecycle actions.
+Create for initial provisioning or Deploy to reconcile its hostname and image.
+The service page shows the hostname currently deployed by the controller and
+whether it matches WHMCS. Activate the `Modd Hosting` addon and grant access
+only to administrator roles that may perform hosting lifecycle actions.
 
 Set the addon's **Docker Hub Webhook Token** to a unique value such as the
 output of `openssl rand -hex 32`. The Docker images page shows the URL to add

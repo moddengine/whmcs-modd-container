@@ -126,7 +126,8 @@ paths:
               schema: { $ref: "#/components/schemas/ServiceStatus" }
         "404": { $ref: "#/components/responses/Error" }
     put:
-      summary: Provision a service
+      summary: Provision or reconcile a service
+      description: Existing active services reconcile domains and image version; suspended services reconcile domains only.
       operationId: provisionService
       requestBody:
         required: true
@@ -138,8 +139,8 @@ paths:
               version: v21.6.24
               display_name: My site
       responses:
-        "200": { description: Identical provisioning already complete, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
-        "202": { description: Synchronous provisioning complete; health and routing continue, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
+        "200": { description: Provisioning already matches or hostname reconciliation completed, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
+        "202": { description: Provisioning or upgrade started; health and routing continue asynchronously, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
     delete:
@@ -282,6 +283,8 @@ components:
         operation: { type: string, enum: [provision, resume, suspend, terminate, upgrade, delete] }
         target_deploy: { type: string, enum: [blue, green] }
         target_version: { type: string }
+        target_main_domain: { type: string, format: hostname }
+        target_staging_domain: { type: string, format: hostname }
         message: { type: string }
         deployments:
           type: object

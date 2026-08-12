@@ -111,6 +111,18 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	} else if !errors.Is(err, state.ErrNotFound) {
 		return nil, false, internal(err)
 	}
+	m.mu.Lock()
+	existing, existingErr := m.Repo.Get(id)
+	if existingErr == nil {
+		derive(&existing)
+	}
+	m.mu.Unlock()
+	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.Version == req.Version) {
+		return m.reconcile(ctx, id, mainDomain, stagingDomain, req.Version, requestID)
+	}
+	if existingErr != nil && !errors.Is(existingErr, state.ErrNotFound) {
+		return nil, false, internal(existingErr)
+	}
 	ok, err := m.Docker.HasVersion(ctx, req.Version)
 	if err != nil {
 		return nil, false, unavailable(err)
@@ -211,6 +223,81 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	return status, true, err
 }
 
+func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, version, requestID string) (*model.Status, bool, error) {
+	m.mu.Lock()
+	service, err := m.liveService(id)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, false, err
+	}
+	derive(&service)
+	state, phase := service.State, service.Phase
+	sameDomains, sameVersion := service.MainDomain == mainDomain && service.StagingDomain == stagingDomain, service.Version == version
+	m.mu.Unlock()
+
+	if state == model.Active {
+		if !sameVersion {
+			return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain)
+		}
+		if phase != "running" {
+			return nil, false, conflict(fmt.Errorf("cannot deploy hostname while service is %s", phase))
+		}
+	} else if state == model.Suspended {
+		if phase != "stopped" {
+			return nil, false, conflict(fmt.Errorf("cannot deploy hostname while service is %s", phase))
+		}
+	} else {
+		return nil, false, conflict(fmt.Errorf("cannot deploy hostname for %s service", state))
+	}
+	if sameDomains {
+		status, statusErr := m.status(ctx, service)
+		return status, false, statusErr
+	}
+	return m.changeDomains(ctx, id, mainDomain, stagingDomain)
+}
+
+func (m *Manager) changeDomains(ctx context.Context, id, mainDomain, stagingDomain string) (*model.Status, bool, error) {
+	service, err := m.deployDomains(ctx, id, mainDomain, stagingDomain)
+	if err != nil {
+		return nil, false, err
+	}
+	status, statusErr := m.status(ctx, service)
+	return status, false, statusErr
+}
+
+func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDomain string) (model.Service, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	service, err := m.liveService(id)
+	if err != nil {
+		return service, err
+	}
+	derive(&service)
+	if service.MainDomain == mainDomain && service.StagingDomain == stagingDomain {
+		return service, nil
+	}
+	oldDomains := domains(service)
+	apply := m.Caddy.Active
+	if service.State == model.Suspended && service.Phase == "stopped" {
+		apply = func(ctx context.Context, id string, domains []string, _ string) error {
+			return m.Caddy.Suspended(ctx, id, domains)
+		}
+	} else if service.State != model.Active || service.Phase != "running" {
+		return service, conflict(fmt.Errorf("cannot deploy hostname while service is %s", service.Phase))
+	}
+	if err := apply(ctx, id, []string{mainDomain, stagingDomain}, service.LiveDeploy); err != nil {
+		return service, unprocessable("hostname_change_failed", err)
+	}
+	service.MainDomain, service.StagingDomain, service.UpdatedAt = mainDomain, stagingDomain, time.Now().UTC()
+	if err := m.Repo.Put(service); err != nil {
+		if rollbackErr := apply(ctx, id, oldDomains, service.LiveDeploy); rollbackErr != nil {
+			return service, internal(fmt.Errorf("persist hostname change: %w; Caddy rollback failed: %v", err, rollbackErr))
+		}
+		return service, internal(fmt.Errorf("persist hostname change: %w", err))
+	}
+	return service, nil
+}
+
 func (m *Manager) Suspend(ctx context.Context, id, requestID string) (*model.Status, bool, error) {
 	return m.changeState(ctx, id, requestID, model.Suspended)
 }
@@ -237,6 +324,7 @@ func (m *Manager) Resume(ctx context.Context, id, requestID string) (*model.Stat
 		return nil, false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
 	}
 	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion = "starting", "resume", service.LiveDeploy, service.Version
+	service.TargetMainDomain, service.TargetStagingDomain = "", ""
 	service.UpdatedAt = time.Now().UTC()
 	if err := m.Repo.Put(service); err != nil {
 		m.mu.Unlock()
@@ -298,7 +386,7 @@ func (m *Manager) changeState(ctx context.Context, id, requestID, target string)
 			return nil, false, conflict(fmt.Errorf("cannot terminate service from %s", service.State))
 		}
 	}
-	service.Phase, service.Operation, service.UpdatedAt = "stopping", target, time.Now().UTC()
+	service.Phase, service.Operation, service.TargetMainDomain, service.TargetStagingDomain, service.UpdatedAt = "stopping", target, "", "", time.Now().UTC()
 	if err := m.Repo.Put(service); err != nil {
 		m.mu.Unlock()
 		return nil, false, internal(err)
@@ -413,6 +501,10 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) (*model.Tomb
 }
 
 func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID string) (*model.Status, bool, error) {
+	return m.upgrade(ctx, id, req, requestID, "", "")
+}
+
+func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID, targetMainDomain, targetStagingDomain string) (*model.Status, bool, error) {
 	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
 		return nil, false, badRequest(err)
 	}
@@ -458,6 +550,7 @@ func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeReque
 	}
 	target := opposite(service.LiveDeploy)
 	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.UpdatedAt = "starting", "upgrade", target, req.Version, time.Now().UTC()
+	service.TargetMainDomain, service.TargetStagingDomain = targetMainDomain, targetStagingDomain
 	service.Deploy[target] = deployment(m.Config.Deployment.Socket, id, target, req.Version)
 	if err := m.Repo.Put(service); err != nil {
 		m.mu.Unlock()
@@ -541,11 +634,15 @@ func (m *Manager) finishHealth(id, operation, requestID string) {
 	service.Deploy[target] = withHealth(service.Deploy[target], "healthy")
 	service.Phase, service.UpdatedAt = "routing", time.Now().UTC()
 	m.putDeferred(service)
-	if err := m.Caddy.Active(context.Background(), id, domains(service), target); err != nil {
+	if err := m.Caddy.Active(context.Background(), id, routingDomains(service, operation), target); err != nil {
 		m.failDeferred(service, requestID, err)
 		return
 	}
 	if operation == "upgrade" {
+		if service.TargetMainDomain != "" {
+			service.MainDomain, service.StagingDomain = service.TargetMainDomain, service.TargetStagingDomain
+			service.TargetMainDomain, service.TargetStagingDomain = "", ""
+		}
 		service.Phase, service.UpdatedAt = "draining", time.Now().UTC()
 		m.putDeferred(service)
 		if err := cleanupOldDeploy(context.Background(), m.Config.Deployment.TrafficDrain, func(ctx context.Context) error {
@@ -556,7 +653,7 @@ func (m *Manager) finishHealth(id, operation, requestID string) {
 		}
 		service.LiveDeploy, service.Version = target, service.TargetVersion
 	}
-	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.LastError, service.UpdatedAt = "running", "", "", "", "", time.Now().UTC()
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.LastError, service.UpdatedAt = "running", "", "", "", "", "", "", time.Now().UTC()
 	m.putDeferred(service)
 	m.notifyAsync(operation, true, service, requestID, "")
 }
@@ -576,7 +673,7 @@ func (m *Manager) finishRouting(id, operation, requestID string) {
 		m.failDeferred(service, requestID, err)
 		return
 	}
-	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.LastError, service.UpdatedAt = "stopped", "", "", "", "", time.Now().UTC()
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.LastError, service.UpdatedAt = "stopped", "", "", "", "", "", "", time.Now().UTC()
 	for slot, deploy := range service.Deploy {
 		service.Deploy[slot] = withHealth(deploy, "unknown")
 	}
@@ -1015,6 +1112,13 @@ func deployment(socket, id, slot string, version ...string) model.Deploy {
 
 func domains(service model.Service) []string {
 	return []string{service.MainDomain, service.StagingDomain}
+}
+
+func routingDomains(service model.Service, operation string) []string {
+	if operation == "upgrade" && service.TargetMainDomain != "" {
+		return []string{service.TargetMainDomain, service.TargetStagingDomain}
+	}
+	return domains(service)
 }
 
 func opposite(slot string) string {

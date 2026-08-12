@@ -22,23 +22,25 @@ type UpgradeRequest struct {
 }
 
 type Service struct {
-	ID            string            `toml:"id" json:"id"`
-	State         string            `toml:"state" json:"state"`
-	MainDomain    string            `toml:"main_domain" json:"main_domain"`
-	StagingDomain string            `toml:"staging_domain" json:"staging_domain"`
-	DisplayName   string            `toml:"display_name,omitempty" json:"display_name,omitempty"`
-	Version       string            `toml:"version" json:"version"`
-	LiveDeploy    string            `toml:"live_deploy" json:"live_deploy"`
-	Phase         string            `toml:"phase,omitempty" json:"phase"`
-	Operation     string            `toml:"operation,omitempty" json:"operation,omitempty"`
-	TargetDeploy  string            `toml:"target_deploy,omitempty" json:"target_deploy,omitempty"`
-	TargetVersion string            `toml:"target_version,omitempty" json:"target_version,omitempty"`
-	CreatedAt     time.Time         `toml:"created_at" json:"created_at"`
-	UpdatedAt     time.Time         `toml:"updated_at" json:"updated_at"`
-	LastError     string            `toml:"last_error,omitempty" json:"last_error,omitempty"`
-	Dataset       DatasetRecord     `toml:"zfs" json:"dataset"`
-	Paths         PathRecord        `toml:"paths" json:"paths"`
-	Deploy        map[string]Deploy `toml:"deploy" json:"deploy"`
+	ID                  string            `toml:"id" json:"id"`
+	State               string            `toml:"state" json:"state"`
+	MainDomain          string            `toml:"main_domain" json:"main_domain"`
+	StagingDomain       string            `toml:"staging_domain" json:"staging_domain"`
+	DisplayName         string            `toml:"display_name,omitempty" json:"display_name,omitempty"`
+	Version             string            `toml:"version" json:"version"`
+	LiveDeploy          string            `toml:"live_deploy" json:"live_deploy"`
+	Phase               string            `toml:"phase,omitempty" json:"phase"`
+	Operation           string            `toml:"operation,omitempty" json:"operation,omitempty"`
+	TargetDeploy        string            `toml:"target_deploy,omitempty" json:"target_deploy,omitempty"`
+	TargetVersion       string            `toml:"target_version,omitempty" json:"target_version,omitempty"`
+	TargetMainDomain    string            `toml:"target_main_domain,omitempty" json:"target_main_domain,omitempty"`
+	TargetStagingDomain string            `toml:"target_staging_domain,omitempty" json:"target_staging_domain,omitempty"`
+	CreatedAt           time.Time         `toml:"created_at" json:"created_at"`
+	UpdatedAt           time.Time         `toml:"updated_at" json:"updated_at"`
+	LastError           string            `toml:"last_error,omitempty" json:"last_error,omitempty"`
+	Dataset             DatasetRecord     `toml:"zfs" json:"dataset"`
+	Paths               PathRecord        `toml:"paths" json:"paths"`
+	Deploy              map[string]Deploy `toml:"deploy" json:"deploy"`
 }
 
 type DatasetRecord struct {

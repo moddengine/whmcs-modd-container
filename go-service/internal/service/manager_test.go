@@ -5,12 +5,117 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/moddengine/whmcs-container-controller/internal/caddy"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 	"github.com/moddengine/whmcs-container-controller/internal/state"
 )
+
+func TestDeployDomainsReplacesRoutesAndPersistsState(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	adapter := caddy.Adapter{
+		Dir: filepath.Join(root, "caddy"), SuspensionRoot: "/srv/suspended",
+		ActiveTemplate:  "{domain} {\n  reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
+		ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"},
+	}
+	service := model.Service{
+		ID: "whmcs-123", State: model.Active, Phase: "running", LiveDeploy: "blue", Version: "v1",
+		MainDomain: "old.example.com", StagingDomain: "old-example-com.staging.test",
+	}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Active(t.Context(), service.ID, domains(service), service.LiveDeploy); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Repo: repo, Caddy: adapter}
+	updated, err := manager.deployDomains(t.Context(), service.ID, "new.example.com", "new-example-com.staging.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(adapter.Path(service.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.MainDomain != "new.example.com" || !strings.Contains(string(content), "new.example.com") || strings.Contains(string(content), "old.example.com") {
+		t.Fatalf("hostname was not reconciled: service=%#v caddy=%q", updated, content)
+	}
+	persisted, err := repo.Get(service.ID)
+	if err != nil || persisted.MainDomain != updated.MainDomain || persisted.StagingDomain != updated.StagingDomain {
+		t.Fatalf("deployed hostname was not persisted: %#v, %v", persisted, err)
+	}
+}
+
+func TestDeployDomainsRollsBackFailedCaddyReload(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	adapter := caddy.Adapter{
+		Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n  reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
+		ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"},
+	}
+	service := model.Service{
+		ID: "whmcs-123", State: model.Active, Phase: "running", LiveDeploy: "blue", Version: "v1",
+		MainDomain: "old.example.com", StagingDomain: "old-example-com.staging.test",
+	}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Active(t.Context(), service.ID, domains(service), service.LiveDeploy); err != nil {
+		t.Fatal(err)
+	}
+	adapter.ReloadCommand = []string{"false"}
+	manager := Manager{Repo: repo, Caddy: adapter}
+	if _, err := manager.deployDomains(t.Context(), service.ID, "new.example.com", "new-example-com.staging.test"); err == nil {
+		t.Fatal("hostname change succeeded despite failed Caddy reload")
+	}
+	content, _ := os.ReadFile(adapter.Path(service.ID))
+	persisted, _ := repo.Get(service.ID)
+	if persisted.MainDomain != service.MainDomain || !strings.Contains(string(content), service.MainDomain) || strings.Contains(string(content), "new.example.com") {
+		t.Fatalf("failed hostname change was not rolled back: service=%#v caddy=%q", persisted, content)
+	}
+}
+
+func TestDeployDomainsUpdatesSuspendedRoute(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	adapter := caddy.Adapter{Dir: filepath.Join(root, "caddy"), SuspensionRoot: "/srv/suspended", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}}
+	service := model.Service{ID: "whmcs-123", State: model.Suspended, Phase: "stopped", MainDomain: "old.example.com", StagingDomain: "old.staging.test"}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Repo: repo, Caddy: adapter}
+	updated, err := manager.deployDomains(t.Context(), service.ID, "new.example.com", "new.staging.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := os.ReadFile(adapter.Path(service.ID))
+	if updated.MainDomain != "new.example.com" || !strings.Contains(string(content), "new.example.com, new.staging.test") || strings.Contains(string(content), "reverse_proxy") {
+		t.Fatalf("suspended hostname was not reconciled: service=%#v caddy=%q", updated, content)
+	}
+}
+
+func TestRoutingDomainsUsesPendingHostname(t *testing.T) {
+	service := model.Service{MainDomain: "old.example.com", StagingDomain: "old.staging.test", TargetMainDomain: "new.example.com", TargetStagingDomain: "new.staging.test"}
+	if got := routingDomains(service, "upgrade"); got[0] != service.TargetMainDomain || got[1] != service.TargetStagingDomain {
+		t.Fatalf("routingDomains() = %#v", got)
+	}
+	if got := routingDomains(service, "resume"); got[0] != service.MainDomain || got[1] != service.StagingDomain {
+		t.Fatalf("resume used pending hostname: %#v", got)
+	}
+}
 
 func TestCleanupOldDeploySurvivesRequestCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
@@ -82,6 +187,9 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 	}
 	if _, ordered := compareVersions("latest", "v21.6.24"); ordered {
 		t.Fatal("unordered tag was treated as ordered")
+	}
+	if _, err := validateUpgrade(model.Service{State: model.Active, Phase: "running", Version: "v2"}, model.UpgradeRequest{Version: "v1"}); err == nil {
+		t.Fatal("Create-style upgrade accepted a downgrade without confirmation")
 	}
 }
 

@@ -46,6 +46,18 @@ function moddhosting_CreateAccount(array $params): string
     }
 }
 
+/** @return array<string, string> */
+function moddhosting_AdminCustomButtonArray(): array
+{
+    return ['Deploy' => 'deploy'];
+}
+
+/** @param array<string, mixed> $params */
+function moddhosting_deploy(array $params): string
+{
+    return moddhosting_CreateAccount($params);
+}
+
 /** @param array<string, mixed> $params */
 function moddhosting_SuspendAccount(array $params): string
 {
@@ -105,8 +117,27 @@ function moddhosting_AdminServicesTabFields(array $params): array
             }
             $status = [];
         }
+        $requestedHost = strtolower(rtrim(trim((string) ($params['domain'] ?? '')), '.'));
+        $requestedStaging = strtolower(rtrim(trim((string) ($params['configoption1'] ?? '')), '.'));
+        $deployedHost = (string) ($status['main_domain'] ?? '');
+        $deployedStaging = (string) ($status['staging_domain'] ?? '');
+        $inSync = $deployedHost !== '' && $requestedHost === $deployedHost
+            && ($requestedStaging === '' || $requestedStaging === $deployedStaging);
+        $busy = in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining'], true);
+        if ($inSync) {
+            $hostnameStatus = '<span class="text-success">&#10003; In sync</span>';
+        } elseif ($busy) {
+            $hostnameStatus = '<span class="text-warning">&#10007; Update in progress &mdash; refresh to confirm</span>';
+        } elseif ($deployedHost === '') {
+            $hostnameStatus = '<span class="text-warning">&#10007; Not deployed &mdash; run Create or Deploy</span>';
+        } else {
+            $hostnameStatus = '<span class="text-warning">&#10007; Out of sync &mdash; click Deploy to update the live hostname</span>';
+        }
         return [
             'Image Version' => '<select name="modulefields[0]" class="form-control">' . $options . '</select>',
+            'Deployed Hostname' => moddhosting_escape($deployedHost !== '' ? $deployedHost : 'not provisioned'),
+            'Deployed Staging Hostname' => moddhosting_escape($deployedStaging !== '' ? $deployedStaging : 'not provisioned'),
+            'Hostname Status' => $hostnameStatus,
             'Controller State' => moddhosting_escape((string) ($status['state'] ?? 'unknown')),
             'Deployed Version' => moddhosting_escape((string) ($status['version'] ?? 'not provisioned')),
             'Live Deploy' => moddhosting_escape((string) ($status['live_deploy'] ?? 'unknown')),
