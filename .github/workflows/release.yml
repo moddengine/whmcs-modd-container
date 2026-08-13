@@ -32,7 +32,12 @@ jobs:
 
       - name: Package WHMCS plugin
         working-directory: whmcs-plugin
-        run: zip -r "../modd-hosting-whmcs-${GITHUB_REF_NAME}.zip" modules
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          sed -i "s/'version' => 'DEV'/'version' => '$version'/" modules/addons/moddhosting/moddhosting.php
+          grep -Fq "'version' => '$version'" modules/addons/moddhosting/moddhosting.php
+          zip -r "../modd-hosting-whmcs-${GITHUB_REF_NAME}.zip" modules
 
       - name: Publish GitHub release
         env:

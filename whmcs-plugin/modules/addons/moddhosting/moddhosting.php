@@ -18,7 +18,7 @@ function moddhosting_config(): array
     return [
         'name' => 'Modd Hosting',
         'description' => 'Administrative controller visibility and manual lifecycle actions.',
-        'version' => '1.0.0',
+        'version' => 'DEV',
         'author' => 'MODD Pty Ltd',
         'language' => 'english',
         'fields' => [
