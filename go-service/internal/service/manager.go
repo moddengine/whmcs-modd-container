@@ -257,6 +257,7 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 	derive(&service)
 	state, phase := service.State, service.Phase
 	sameVersion := service.Version == version
+	sameHost := service.MainDomain == mainDomain && service.StagingDomain == stagingDomain && service.PublicIPv4 == publicIPv4
 	m.mu.Unlock()
 
 	if state == model.Active {
@@ -270,6 +271,14 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 		if phase != "stopped" {
 			return nil, false, conflict(fmt.Errorf("cannot deploy hostname while service is %s", phase))
 		}
+	} else if state == model.Terminated {
+		if phase != "stopped" {
+			return nil, false, conflict(fmt.Errorf("cannot redeploy service while it is %s", phase))
+		}
+		if !sameVersion || !sameHost {
+			return nil, false, conflict(errors.New("terminated service must be redeployed with its existing hostname, IP, and version"))
+		}
+		return m.Resume(ctx, id, requestID)
 	} else {
 		return nil, false, conflict(fmt.Errorf("cannot deploy hostname for %s service", state))
 	}

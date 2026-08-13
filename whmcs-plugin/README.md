@@ -22,9 +22,10 @@ as a Docker Hub repository webhook. Stable `v*` pushes are pulled by every
 configured controller; other pushed tags are ignored. The same page can pull
 the latest stable tag or an exact PR/dev tag manually.
 
-Automatic WHMCS termination intentionally returns an error. Termination,
-permanent deletion, upgrades, bulk upgrades, and status live
-in **Addons > Modd Hosting**.
+WHMCS termination removes containers and routing while retaining customer
+data. Permanent purging, upgrades, bulk upgrades, and status live in
+**Addons > Modd Hosting**. The service's **Deploy** action restores a terminated
+service with its retained hostname, IP, version, and data.
 
 Static analysis:
 

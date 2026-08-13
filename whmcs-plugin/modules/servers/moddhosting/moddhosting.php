@@ -26,9 +26,7 @@ function moddhosting_MetaData(): array
 /** @return array<string, mixed> */
 function moddhosting_ConfigOptions(): array
 {
-    return [
-        'Staging Domain' => ['Type' => 'text', 'Size' => '50', 'Description' => 'Blank derives it automatically'],
-    ];
+    return [];
 }
 
 /** @param array<string, mixed> $params */
@@ -37,7 +35,6 @@ function moddhosting_CreateAccount(array $params): string
     try {
         return moddhosting_call($params, 'PUT', '/v1/services/' . moddhosting_service_id($params), [
             'main_domain' => (string) $params['domain'],
-            'staging_domain' => trim((string) ($params['configoption1'] ?? '')),
 			'public_ipv4' => trim((string) $params['serverip']),
             'version' => moddhosting_selected_version($params),
             'display_name' => 'WHMCS service ' . (int) $params['serviceid'],
@@ -74,7 +71,7 @@ function moddhosting_UnsuspendAccount(array $params): string
 /** @param array<string, mixed> $params */
 function moddhosting_TerminateAccount(array $params): string
 {
-    return 'Automatic termination is disabled. Use Addons > Modd Hosting to terminate manually.';
+    return moddhosting_call($params, 'POST', '/v1/services/' . moddhosting_service_id($params) . '/terminate');
 }
 
 /**
@@ -119,11 +116,9 @@ function moddhosting_AdminServicesTabFields(array $params): array
             $status = [];
         }
         $requestedHost = strtolower(rtrim(trim((string) ($params['domain'] ?? '')), '.'));
-        $requestedStaging = strtolower(rtrim(trim((string) ($params['configoption1'] ?? '')), '.'));
         $deployedHost = (string) ($status['main_domain'] ?? '');
         $deployedStaging = (string) ($status['staging_domain'] ?? '');
-        $inSync = $deployedHost !== '' && $requestedHost === $deployedHost
-            && ($requestedStaging === '' || $requestedStaging === $deployedStaging);
+        $inSync = $deployedHost !== '' && $requestedHost === $deployedHost;
         $busy = in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining'], true);
         if ($inSync) {
             $hostnameStatus = '<span class="text-success">&#10003; In sync</span>';

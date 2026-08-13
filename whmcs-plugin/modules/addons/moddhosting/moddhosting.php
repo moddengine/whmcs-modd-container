@@ -253,19 +253,13 @@ function moddhosting_service_page(array $vars): void
     $client = moddhosting_addon_client_for_id($id);
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action = (string) ($_POST['action'] ?? '');
-        if ($action === 'terminate' && ($_POST['confirmation'] ?? '') === 'TERMINATE') {
-            $client->request('POST', '/v1/services/' . rawurlencode($id) . '/terminate');
-            echo '<div class="alert alert-success">Service terminated.</div>';
-        } elseif ($action === 'delete-confirm') {
-            moddhosting_delete_confirmation($vars, $id);
-            return;
-        } elseif ($action === 'delete' && ($_POST['confirmation'] ?? '') === 'DELETE') {
+        if ($action === 'purge' && ($_POST['confirmation'] ?? '') === 'PURGE') {
             $current = $client->request('GET', '/v1/services/' . rawurlencode($id));
             if (($current['state'] ?? '') !== 'terminated') {
-                throw new \RuntimeException('Service must still be terminated before deletion.');
+                throw new \RuntimeException('Service must still be terminated before purging.');
             }
             $client->request('DELETE', '/v1/services/' . rawurlencode($id));
-            echo '<div class="alert alert-success">Service data permanently deleted.</div>';
+            echo '<div class="alert alert-success">Service data permanently purged.</div>';
             return;
         } elseif ($action === 'upgrade') {
             $client->request('POST', '/v1/services/' . rawurlencode($id) . '/upgrade', [
@@ -291,26 +285,11 @@ function moddhosting_service_page(array $vars): void
         echo '</select><label><input type="checkbox" name="confirm_downgrade"> I confirm this may be a downgrade and compatibility is not guaranteed.</label><br>'
             . '<button class="btn btn-primary">Deploy version</button></form>';
     }
-    if (in_array(($service['state'] ?? ''), ['active', 'suspended'], true)) {
-        echo '<h3>Terminate</h3><p>Containers stop and routing is removed; data remains. Type TERMINATE.</p>'
-            . '<form method="post"><input type="hidden" name="token" value="' . moddhosting_h($token) . '"><input type="hidden" name="action" value="terminate">'
-            . '<input name="confirmation" class="form-control" autocomplete="off"><button class="btn btn-warning">Terminate Hosting Service</button></form>';
-    }
     if (($service['state'] ?? '') === 'terminated') {
-        echo '<h3>Delete permanently</h3><p>This destroys the ZFS dataset and cannot be undone.</p>'
-            . '<form method="post"><input type="hidden" name="token" value="' . moddhosting_h($token) . '"><input type="hidden" name="action" value="delete-confirm">'
-            . '<button class="btn btn-danger">Continue to permanent deletion</button></form>';
+        echo '<h3>Delete / purge permanently</h3><p>This destroys the ZFS dataset and cannot be undone. Type PURGE.</p>'
+            . '<form method="post"><input type="hidden" name="token" value="' . moddhosting_h($token) . '"><input type="hidden" name="action" value="purge">'
+            . '<input name="confirmation" class="form-control" autocomplete="off"><button class="btn btn-danger">Permanently purge service</button></form>';
     }
-}
-
-/** @param array<string, mixed> $vars */
-function moddhosting_delete_confirmation(array $vars, string $id): void
-{
-    $action = $vars['modulelink'] . '&page=service&id=' . rawurlencode($id);
-    echo '<h2>Final deletion confirmation</h2><div class="alert alert-danger">All site data will be permanently destroyed. Type DELETE to continue.</div>'
-        . '<form method="post" action="' . moddhosting_h($action) . '"><input type="hidden" name="token" value="' . moddhosting_h(generate_token('plain')) . '">'
-        . '<input type="hidden" name="action" value="delete"><input name="confirmation" class="form-control" autocomplete="off">'
-        . '<button class="btn btn-danger">Permanently delete service</button></form>';
 }
 
 /** @param array<string, mixed> $vars */

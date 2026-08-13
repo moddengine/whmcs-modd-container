@@ -263,7 +263,9 @@ resources:
 
 The ZFS dataset, mountpoint contents, host identity, socket directories, live
 slot selection, and version remain so the service can be resumed. Termination
-is therefore reversible; deletion is not.
+is therefore reversible; deletion is not. Repeating the original provisioning
+request redeploys a terminated service when its hostname, IP, and version still
+match the retained record.
 
 ## Permanent deletion
 

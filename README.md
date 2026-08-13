@@ -53,9 +53,9 @@ Lifecycle states are:
 - `terminated`: containers and routing are removed, but data remains;
 - `deleted`: containers and the ZFS dataset are removed, leaving a tombstone.
 
-Deletion is only allowed after termination. Automatic WHMCS termination is
-deliberately disabled; termination and deletion are administrator actions in
-**Addons > Modd Hosting**.
+Deletion is only allowed after termination. WHMCS termination removes runtime
+resources while retaining customer data; permanent purging remains an
+administrator action in **Addons > Modd Hosting**.
 
 ## Requirements
 
@@ -251,14 +251,14 @@ In WHMCS:
 5. Create a product using that server.
 6. On each service, select **Image Version** from the controller-provided list,
    then save the service before provisioning it.
-7. Leave **Staging Domain** blank for automatic derivation.
+7. The controller automatically derives the staging domain from the main domain.
 8. Activate **Modd Hosting** under addon modules and restrict it to trusted
    administrator roles.
 9. Set a unique **Docker Hub Webhook Token**, then copy the webhook URL from
    the addon's **Docker images** page into the Docker Hub repository settings.
 
-The provisioning module creates, suspends, resumes, and displays services. The
-addon provides controller status, manual termination and deletion, upgrades,
+The provisioning module creates, suspends, resumes, terminates, and displays
+services. The addon provides controller status, permanent purging, upgrades,
 and bulk upgrades.
 The Docker images page also pulls the latest stable `v*` tag or an exact
 PR/dev tag on every configured controller.
