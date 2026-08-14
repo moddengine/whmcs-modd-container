@@ -14,10 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
+	dockerconfig "github.com/docker/cli/cli/config"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
@@ -36,8 +39,9 @@ const (
 )
 
 type Adapter struct {
-	client *client.Client
-	cfg    config.Docker
+	client    *client.Client
+	cfg       config.Docker
+	configDir string
 }
 
 func New(cfg config.Docker) (*Adapter, error) {
@@ -45,7 +49,7 @@ func New(cfg config.Docker) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Adapter{client: cli, cfg: cfg}, nil
+	return &Adapter{client: cli, cfg: cfg, configDir: dockerconfig.Dir()}, nil
 }
 
 func (a *Adapter) Close() error { return a.client.Close() }
@@ -292,7 +296,11 @@ func (a *Adapter) Pull(ctx context.Context, version string) (model.ImageVersion,
 		return model.ImageVersion{}, err
 	}
 	reference := a.cfg.ImageRepository + ":" + version
-	stream, err := a.client.ImagePull(ctx, reference, image.PullOptions{})
+	auth, err := a.registryAuth(reference)
+	if err != nil {
+		return model.ImageVersion{}, fmt.Errorf("pull %s: %w", reference, err)
+	}
+	stream, err := a.client.ImagePull(ctx, reference, image.PullOptions{RegistryAuth: auth})
 	if err != nil {
 		return model.ImageVersion{}, fmt.Errorf("pull %s: %w", reference, err)
 	}
@@ -305,12 +313,38 @@ func (a *Adapter) Pull(ctx context.Context, version string) (model.ImageVersion,
 		if err := decoder.Decode(&message); errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
-			return model.ImageVersion{}, fmt.Errorf("read pull response: %w", err)
+			return model.ImageVersion{}, fmt.Errorf("pull %s: read response: %w", reference, err)
 		} else if message.Error != "" {
-			return model.ImageVersion{}, errors.New(message.Error)
+			return model.ImageVersion{}, fmt.Errorf("pull %s: %s", reference, message.Error)
 		}
 	}
 	return model.ImageVersion{Version: version, ImageReference: reference, Local: true}, nil
+}
+
+func (a *Adapter) registryAuth(imageReference string) (string, error) {
+	cfg, err := dockerconfig.Load(a.configDir)
+	if err != nil {
+		return "", fmt.Errorf("load Docker config: %w", err)
+	}
+	named, err := reference.ParseNormalizedNamed(imageReference)
+	if err != nil {
+		return "", fmt.Errorf("resolve image registry: %w", err)
+	}
+	auth, err := cfg.GetAuthConfig(reference.Domain(named))
+	if err != nil {
+		return "", fmt.Errorf("load Docker credentials for registry %q: %w", reference.Domain(named), err)
+	}
+	if auth.Username == "" && auth.Password == "" && auth.Auth == "" && auth.IdentityToken == "" && auth.RegistryToken == "" {
+		return "", nil
+	}
+	encoded, err := registry.EncodeAuthConfig(registry.AuthConfig{
+		Username: auth.Username, Password: auth.Password, Auth: auth.Auth,
+		ServerAddress: auth.ServerAddress, IdentityToken: auth.IdentityToken, RegistryToken: auth.RegistryToken,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode Docker registry credentials: %w", err)
+	}
+	return encoded, nil
 }
 
 func latestHubVersion(ctx context.Context, client *http.Client, baseURL, repository string) (string, error) {

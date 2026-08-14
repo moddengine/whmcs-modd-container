@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	"github.com/moddengine/whmcs-container-controller/internal/isolation"
@@ -36,9 +38,10 @@ func TestPullLatestStableImage(t *testing.T) {
 		t.Fatalf("latestHubVersion() = %q after %d pages: %v", version, page, err)
 	}
 
-	var pulledImage, pulledTag string
+	var pulledImage, pulledTag, pulledAuth string
 	dockerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pulledImage, pulledTag = r.URL.Query().Get("fromImage"), r.URL.Query().Get("tag")
+		pulledAuth = r.Header.Get(registry.AuthHeader)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "downloaded"})
 	}))
 	defer dockerAPI.Close()
@@ -46,9 +49,96 @@ func TestPullLatestStableImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pulled, err := (&Adapter{client: client, cfg: config.Docker{ImageRepository: "moddengine/whmcs"}}).Pull(t.Context(), "pr-123")
-	if err != nil || pulled.Version != "pr-123" || pulledImage != "docker.io/moddengine/whmcs" || pulledTag != "pr-123" {
-		t.Fatalf("Pull() = %#v, image=%q tag=%q: %v", pulled, pulledImage, pulledTag, err)
+	pulled, err := (&Adapter{client: client, cfg: config.Docker{ImageRepository: "moddengine/whmcs"}, configDir: t.TempDir()}).Pull(t.Context(), "pr-123")
+	if err != nil || pulled.Version != "pr-123" || pulledImage != "docker.io/moddengine/whmcs" || pulledTag != "pr-123" || pulledAuth != "" {
+		t.Fatalf("Pull() = %#v, image=%q tag=%q authenticated=%t: %v", pulled, pulledImage, pulledTag, pulledAuth != "", err)
+	}
+}
+
+func TestPullUsesDockerCLIRegistryCredentials(t *testing.T) {
+	configDir := t.TempDir()
+	authValue := base64.StdEncoding.EncodeToString([]byte("hub-user:hub-token"))
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"auths":{"https://index.docker.io/v1/":{"auth":"`+authValue+`"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var registryAuth string
+	dockerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		registryAuth = r.Header.Get(registry.AuthHeader)
+		_, _ = io.WriteString(w, `{"status":"downloaded"}`)
+	}))
+	defer dockerAPI.Close()
+	client, err := client.NewClientWithOpts(client.WithHost(dockerAPI.URL), client.WithHTTPClient(dockerAPI.Client()), client.WithVersion("1.52"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &Adapter{client: client, cfg: config.Docker{ImageRepository: "moddengine/moddengine"}, configDir: configDir}
+	if _, err := adapter.Pull(t.Context(), "v1"); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := registry.DecodeAuthConfig(registryAuth)
+	if err != nil || registryAuth == "" || decoded.Username != "hub-user" || decoded.Password != "hub-token" {
+		t.Fatalf("unexpected registry authentication: present=%t username=%q: %v", registryAuth != "", decoded.Username, err)
+	}
+}
+
+func TestRegistryAuthErrorsAndAnonymousPulls(t *testing.T) {
+	t.Run("missing config", func(t *testing.T) {
+		auth, err := (&Adapter{configDir: t.TempDir()}).registryAuth("busybox:latest")
+		if err != nil || auth != "" {
+			t.Fatalf("registryAuth() = %q, %v", auth, err)
+		}
+	})
+
+	t.Run("malformed config", func(t *testing.T) {
+		configDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"auths":`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := (&Adapter{configDir: configDir}).registryAuth("busybox:latest")
+		if err == nil || !strings.Contains(err.Error(), "load Docker config") {
+			t.Fatalf("expected actionable config error, got %v", err)
+		}
+	})
+
+	t.Run("credential helper failure", func(t *testing.T) {
+		configDir, binDir := t.TempDir(), t.TempDir()
+		if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"credsStore":"broken"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		helper := filepath.Join(binDir, "docker-credential-broken")
+		if err := os.WriteFile(helper, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		_, err := (&Adapter{configDir: configDir}).registryAuth("busybox:latest")
+		if err == nil || !strings.Contains(err.Error(), "Docker credentials") {
+			t.Fatalf("expected actionable credential-helper error, got %v", err)
+		}
+	})
+}
+
+func TestPullErrorContainsImageButNotCredentials(t *testing.T) {
+	configDir := t.TempDir()
+	authValue := base64.StdEncoding.EncodeToString([]byte("secret-user:secret-token"))
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"auths":{"https://index.docker.io/v1/":{"auth":"`+authValue+`"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dockerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"denied"}`, http.StatusUnauthorized)
+	}))
+	defer dockerAPI.Close()
+	client, err := client.NewClientWithOpts(client.WithHost(dockerAPI.URL), client.WithHTTPClient(dockerAPI.Client()), client.WithVersion("1.52"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&Adapter{client: client, cfg: config.Docker{ImageRepository: "moddengine/moddengine"}, configDir: configDir}).Pull(t.Context(), "private")
+	if err == nil || !strings.Contains(err.Error(), "moddengine/moddengine:private") {
+		t.Fatalf("pull error lost image reference: %v", err)
+	}
+	for _, secret := range []string{"secret-user", "secret-token", authValue} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("pull error exposed credentials: %v", err)
+		}
 	}
 }
 
