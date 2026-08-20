@@ -65,9 +65,12 @@ test -z "$(sudo docker ps -a --filter "label=au.modd.service-id=$service_id" --f
 echo 'termination check passed'
 
 request -X PUT -H 'Content-Type: application/json' \
-	-d "{\"main_domain\":\"$service_id.test\",\"public_ipv4\":\"$public_ipv4\",\"version\":\"$upgrade_version\",\"display_name\":\"Isolation E2E\"}" \
+	-d "{\"main_domain\":\"redeployed-$service_id.test\",\"staging_domain\":\"staging-$service_id.test\",\"public_ipv4\":\"203.0.113.11\",\"version\":\"$version\",\"display_name\":\"Redeployed E2E\"}" \
 	"$api/services/$service_id" > /tmp/modd-e2e-redeploy.json
 grep -q '"state":"active"' /tmp/modd-e2e-redeploy.json
+grep -q '"main_domain":"redeployed-'"$service_id"'.test"' /tmp/modd-e2e-redeploy.json
+grep -q '"staging_domain":"staging-'"$service_id"'.test"' /tmp/modd-e2e-redeploy.json
+grep -q '"version":"'"$version"'"' /tmp/modd-e2e-redeploy.json
 wait_phase "$service_id" running
 test "$(sudo docker ps --filter "label=au.modd.service-id=$service_id" -q | wc -l)" = 1
 echo 'terminated service redeployment check passed'

@@ -139,7 +139,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	}
 	m.mu.Unlock()
 	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.PublicIPv4 == publicIPv4 && existing.Version == req.Version) {
-		return m.reconcile(ctx, id, mainDomain, stagingDomain, publicIPv4, req.Version, requestID)
+		return m.reconcile(ctx, id, mainDomain, stagingDomain, publicIPv4, req.Version, req.DisplayName, requestID)
 	}
 	if existingErr != nil && !errors.Is(existingErr, state.ErrNotFound) {
 		return nil, false, internal(existingErr)
@@ -247,7 +247,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	return status, true, err
 }
 
-func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, publicIPv4, version, requestID string) (*model.Status, bool, error) {
+func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, publicIPv4, version, displayName, requestID string) (*model.Status, bool, error) {
 	m.mu.Lock()
 	service, err := m.liveService(id)
 	if err != nil {
@@ -257,7 +257,6 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 	derive(&service)
 	state, phase := service.State, service.Phase
 	sameVersion := service.Version == version
-	sameHost := service.MainDomain == mainDomain && service.StagingDomain == stagingDomain && service.PublicIPv4 == publicIPv4
 	m.mu.Unlock()
 
 	if state == model.Active {
@@ -275,8 +274,26 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 		if phase != "stopped" {
 			return nil, false, conflict(fmt.Errorf("cannot redeploy service while it is %s", phase))
 		}
-		if !sameVersion || !sameHost {
-			return nil, false, conflict(errors.New("terminated service must be redeployed with its existing hostname, IP, and version"))
+		available, err := m.Docker.HasVersion(ctx, version)
+		if err != nil {
+			return nil, false, unavailable(err)
+		}
+		if !available {
+			return nil, false, notFound(errors.New("image version is not locally available"))
+		}
+		m.mu.Lock()
+		service, err = m.liveService(id)
+		if err == nil && service.State == model.Terminated && service.Phase == "stopped" {
+			service.MainDomain, service.StagingDomain, service.PublicIPv4 = mainDomain, stagingDomain, publicIPv4
+			service.Version, service.DisplayName, service.UpdatedAt = version, displayName, time.Now().UTC()
+			service.Deploy[service.LiveDeploy] = deployment(m.Config.Deployment.Socket, id, service.LiveDeploy, version)
+			err = m.Repo.Put(service)
+		} else if err == nil {
+			err = conflict(errors.New("service state changed during redeployment"))
+		}
+		m.mu.Unlock()
+		if err != nil {
+			return nil, false, internal(err)
 		}
 		return m.Resume(ctx, id, requestID)
 	} else {

@@ -35,6 +35,7 @@ function moddhosting_CreateAccount(array $params): string
     try {
         return moddhosting_call($params, 'PUT', '/v1/services/' . moddhosting_service_id($params), [
             'main_domain' => (string) $params['domain'],
+			'staging_domain' => moddhosting_selected_staging($params),
 			'public_ipv4' => trim((string) $params['serverip']),
             'version' => moddhosting_selected_version($params),
             'display_name' => 'WHMCS service ' . (int) $params['serviceid'],
@@ -96,17 +97,8 @@ function moddhosting_AdminServicesTabFields(array $params): array
 {
     try {
         $client = moddhosting_client($params);
-        $versions = moddhosting_versions($params);
-        $selected = trim((string) ($params['model']->serviceProperties->get('Image Version') ?? ''));
-        if ($selected === '') {
-            $selected = (string) $versions[0]['version'];
-        }
-        $options = '';
-        foreach ($versions as $version) {
-            $tag = (string) $version['version'];
-            $options .= '<option value="' . moddhosting_escape($tag) . '"' . ($tag === $selected ? ' selected' : '') . '>'
-                . moddhosting_escape($tag) . '</option>';
-        }
+        moddhosting_selected_version($params);
+        $requestedStaging = moddhosting_selected_staging($params);
         try {
             $status = $client->request('GET', '/v1/services/' . moddhosting_service_id($params));
         } catch (ApiException $error) {
@@ -118,7 +110,8 @@ function moddhosting_AdminServicesTabFields(array $params): array
         $requestedHost = strtolower(rtrim(trim((string) ($params['domain'] ?? '')), '.'));
         $deployedHost = (string) ($status['main_domain'] ?? '');
         $deployedStaging = (string) ($status['staging_domain'] ?? '');
-        $inSync = $deployedHost !== '' && $requestedHost === $deployedHost;
+        $inSync = $deployedHost !== '' && $requestedHost === $deployedHost
+            && ($requestedStaging === '' || $requestedStaging === $deployedStaging);
         $busy = in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining'], true);
         if ($inSync) {
             $hostnameStatus = '<span class="text-success">&#10003; In sync</span>';
@@ -130,7 +123,6 @@ function moddhosting_AdminServicesTabFields(array $params): array
             $hostnameStatus = '<span class="text-warning">&#10007; Out of sync &mdash; click Deploy to update the live hostname</span>';
         }
         return [
-            'Image Version' => '<select name="modulefields[0]" class="form-control">' . $options . '</select>',
             'Deployed Hostname' => moddhosting_escape($deployedHost !== '' ? $deployedHost : 'not provisioned'),
             'Deployed Staging Hostname' => moddhosting_escape($deployedStaging !== '' ? $deployedStaging : 'not provisioned'),
             'Hostname Status' => $hostnameStatus,
@@ -146,20 +138,6 @@ function moddhosting_AdminServicesTabFields(array $params): array
     } catch (\Throwable $error) {
         return ['Controller Error' => moddhosting_escape($error->getMessage())];
     }
-}
-
-/** @param array<string, mixed> $params */
-function moddhosting_AdminServicesTabFieldsSave(array $params): void
-{
-    $version = trim((string) ($_POST['modulefields'][0] ?? ''));
-    if ($version === '') {
-        return;
-    }
-    $available = array_column(moddhosting_versions($params), 'version');
-    if (!in_array($version, $available, true)) {
-        throw new \InvalidArgumentException('Select an image version available from the controller.');
-    }
-    $params['model']->serviceProperties->save(['Image Version' => $version]);
 }
 
 /**
@@ -273,6 +251,14 @@ function moddhosting_selected_version(array $params): string
         throw new \InvalidArgumentException('The service image version is not available from the controller.');
     }
     return $version;
+}
+
+/** @param array<string, mixed> $params */
+function moddhosting_selected_staging(array $params): string
+{
+    $staging = trim((string) ($params['model']->serviceProperties->get('Staging Hostname') ?? ''));
+    $params['model']->serviceProperties->save(['Staging Hostname' => $staging]);
+    return $staging;
 }
 
 /** @param array<string, mixed> $params */

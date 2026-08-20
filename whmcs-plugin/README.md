@@ -24,8 +24,9 @@ the latest stable tag or an exact PR/dev tag manually.
 
 WHMCS termination removes containers and routing while retaining customer
 data. Permanent purging, upgrades, bulk upgrades, and status live in
-**Addons > Modd Hosting**. The service's **Deploy** action restores a terminated
-service with its retained hostname, IP, version, and data.
+**Addons > Modd Hosting**. The service's **Deploy** action applies its current
+hostname, staging hostname, IP, and image version, then restores a terminated
+service with its retained data.
 
 Static analysis:
 
