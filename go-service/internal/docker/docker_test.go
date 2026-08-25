@@ -33,7 +33,7 @@ func TestPullLatestStableImage(t *testing.T) {
 		_, _ = io.WriteString(w, `{"next":null,"results":[{"name":"v3","tag_last_pushed":"2026-08-10T02:00:00Z"}]}`)
 	}))
 	defer hub.Close()
-	version, err := latestHubVersion(t.Context(), hub.Client(), hub.URL, "moddengine/whmcs")
+	version, err := latestHubVersion(t.Context(), hub.Client(), hub.URL, "moddengine/whmcs", "", "")
 	if err != nil || version != "v3" || page != 2 {
 		t.Fatalf("latestHubVersion() = %q after %d pages: %v", version, page, err)
 	}
@@ -52,6 +52,31 @@ func TestPullLatestStableImage(t *testing.T) {
 	pulled, err := (&Adapter{client: client, cfg: config.Docker{ImageRepository: "moddengine/whmcs"}, configDir: t.TempDir()}).Pull(t.Context(), "pr-123")
 	if err != nil || pulled.Version != "pr-123" || pulledImage != "docker.io/moddengine/whmcs" || pulledTag != "pr-123" || pulledAuth != "" {
 		t.Fatalf("Pull() = %#v, image=%q tag=%q authenticated=%t: %v", pulled, pulledImage, pulledTag, pulledAuth != "", err)
+	}
+}
+
+func TestLatestStableImageUsesDockerHubCredentials(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/token":
+			var login map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&login); err != nil || login["identifier"] != "hub-user" || login["secret"] != "hub-token" {
+				t.Fatalf("unexpected Docker Hub login: %#v, %v", login, err)
+			}
+			_, _ = io.WriteString(w, `{"access_token":"short-lived"}`)
+		case "/namespaces/moddengine/repositories/whmcs/tags":
+			if r.Header.Get("Authorization") != "Bearer short-lived" {
+				t.Fatalf("missing Docker Hub bearer token")
+			}
+			_, _ = io.WriteString(w, `{"results":[{"name":"v4","tag_last_pushed":"2026-08-20T02:00:00Z"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer hub.Close()
+	version, err := latestHubVersion(t.Context(), hub.Client(), hub.URL, "moddengine/whmcs", "hub-user", "hub-token")
+	if err != nil || version != "v4" {
+		t.Fatalf("latestHubVersion() = %q, %v", version, err)
 	}
 }
 

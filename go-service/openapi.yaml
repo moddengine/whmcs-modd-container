@@ -52,6 +52,16 @@ paths:
                 required: [versions]
         "401": { $ref: "#/components/responses/Error" }
   /v1/image/pull:
+    get:
+      summary: Get the current image pull state
+      operationId: imagePullStatus
+      responses:
+        "200":
+          description: Current in-memory pull state; resets to idle when the controller restarts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImagePullStatus" }
+        "401": { $ref: "#/components/responses/Error" }
     post:
       summary: Pull an image from Docker Hub
       description: An empty version resolves and pulls the most recently pushed tag starting with v.
@@ -79,6 +89,7 @@ paths:
                 required: [status, version]
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+        "409": { description: Another image pull is pending, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /v1/services:
     get:
       summary: List services and observed status
@@ -248,6 +259,14 @@ components:
         type: string
         pattern: '^whmcs-[1-9][0-9]*$'
   schemas:
+    ImagePullStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [idle, pending, completed, failed] }
+        version: { type: string }
+        error: { type: string }
+      required: [status]
     ProvisionRequest:
       type: object
       additionalProperties: false

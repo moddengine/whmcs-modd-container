@@ -20,13 +20,15 @@ Set the addon's **Docker Hub Webhook Token** to a unique value such as the
 output of `openssl rand -hex 32`. The Docker images page shows the URL to add
 as a Docker Hub repository webhook. Stable `v*` pushes are pulled by every
 configured controller; other pushed tags are ignored. The same page can pull
-the latest stable tag or an exact PR/dev tag manually.
+the latest stable tag or an exact PR/dev tag manually and polls each controller
+every two seconds until its pull completes or fails.
 
 WHMCS termination removes containers and routing while retaining customer
 data. Permanent purging, upgrades, bulk upgrades, and status live in
 **Addons > Modd Hosting**. The service's **Deploy** action applies its current
 hostname, staging hostname, IP, and image version, then restores a terminated
-service with its retained data.
+service with its retained data. Each configured controller has a named Services
+button; select active rows there to run a controller-local bulk upgrade.
 The service page also shows the latest DNS status, error, and successful sync
 time; use **Reconnect DNS** there to queue the current domain and IP again.
 

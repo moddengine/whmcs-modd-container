@@ -60,7 +60,7 @@ function moddhosting_output(array $vars): void
         match ($page) {
             'services' => moddhosting_services_page($vars),
             'service' => moddhosting_service_page($vars),
-            'bulk' => moddhosting_bulk_page($vars),
+            'bulk' => moddhosting_services_page($vars),
             'images' => moddhosting_images_page($vars),
             default => moddhosting_overview_page(),
         };
@@ -80,6 +80,7 @@ function moddhosting_images_page(array $vars): void
         }
         moddhosting_render_pull_results(moddhosting_pull_all($version));
     }
+	$statuses = moddhosting_pull_status_all();
     $token = trim((string) ($vars['webhookToken'] ?? ''));
     echo '<h2>Docker images</h2>';
     if ($token === '') {
@@ -94,15 +95,19 @@ function moddhosting_images_page(array $vars): void
         . '<h3>Pull a PR/dev version</h3><form method="post" class="form-inline"><input type="hidden" name="token" value="' . $formToken . '">'
         . '<input type="hidden" name="action" value="pull-version"><input class="form-control" name="version" maxlength="128" required placeholder="pr-123"> '
         . '<button class="btn btn-default">Pull specific version on all controllers</button></form>';
+	moddhosting_render_pull_statuses($statuses);
+	if (array_filter($statuses, static fn(array $status): bool => $status['status'] === 'pending') !== []) {
+		$url = $vars['modulelink'] . '&page=images';
+		echo '<script>setTimeout(function(){location.href=' . json_encode($url, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) . ';},2000);</script>';
+	}
 }
 
 /** @return list<array{server: string, version?: string, error?: string}> */
 function moddhosting_pull_all(string $version): array
 {
-    $servers = Capsule::table('tblservers')->where('type', 'moddhosting')->orderBy('id')->get();
     $results = [];
-    foreach ($servers as $server) {
-        $name = trim((string) ($server->name ?? '')) ?: trim((string) ($server->hostname ?: $server->ipaddress));
+    foreach (moddhosting_servers() as $server) {
+        $name = moddhosting_server_name($server);
         try {
             $pulled = moddhosting_client_from_server($server)->request('POST', '/v1/image/pull', ['version' => $version]);
             $results[] = ['server' => $name, 'version' => (string) ($pulled['version'] ?? $version)];
@@ -116,6 +121,27 @@ function moddhosting_pull_all(string $version): array
     return $results;
 }
 
+/** @return list<array{server: string, status: string, version?: string, error?: string}> */
+function moddhosting_pull_status_all(): array
+{
+	$results = [];
+	foreach (moddhosting_servers() as $server) {
+		$name = moddhosting_server_name($server);
+		try {
+			$status = moddhosting_client_from_server($server)->request('GET', '/v1/image/pull');
+			$results[] = [
+				'server' => $name,
+				'status' => (string) ($status['status'] ?? 'unknown'),
+				'version' => (string) ($status['version'] ?? ''),
+				'error' => (string) ($status['error'] ?? ''),
+			];
+		} catch (\Throwable $error) {
+			$results[] = ['server' => $name, 'status' => 'failed', 'error' => $error->getMessage()];
+		}
+	}
+	return $results;
+}
+
 /** @param list<array{server: string, version?: string, error?: string}> $results */
 function moddhosting_render_pull_results(array $results): void
 {
@@ -126,6 +152,22 @@ function moddhosting_render_pull_results(array $results): void
             . moddhosting_h($error === '' ? 'Queued ' . ($result['version'] ?? '') : $error) . '</td></tr>';
     }
     echo '</tbody></table>';
+}
+
+/** @param list<array{server: string, status: string, version?: string, error?: string}> $statuses */
+function moddhosting_render_pull_statuses(array $statuses): void
+{
+	if ($statuses === []) {
+		return;
+	}
+	echo '<h3>Current pull status</h3><table class="table"><thead><tr><th>Controller</th><th>Status</th><th>Version</th></tr></thead><tbody>';
+	foreach ($statuses as $status) {
+		$error = (string) ($status['error'] ?? '');
+		$state = (string) $status['status'];
+		echo '<tr><td>' . moddhosting_h($status['server']) . '</td><td class="' . ($state === 'failed' ? 'text-danger' : ($state === 'completed' ? 'text-success' : '')) . '">'
+			. moddhosting_h($error !== '' ? $state . ': ' . $error : $state) . '</td><td>' . moddhosting_h((string) ($status['version'] ?? '')) . '</td></tr>';
+	}
+	echo '</tbody></table>';
 }
 
 function moddhosting_valid_version(string $version): bool
@@ -208,7 +250,48 @@ function moddhosting_overview_page(): void
 /** @param array<string, mixed> $vars */
 function moddhosting_services_page(array $vars): void
 {
-    $services = moddhosting_addon_client()->request('GET', '/v1/services')['services'] ?? [];
+	$server = moddhosting_selected_server();
+	$client = moddhosting_client_from_server($server);
+	$services = $client->request('GET', '/v1/services')['services'] ?? [];
+	$versions = $client->request('GET', '/v1/image/versions')['versions'] ?? [];
+	if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+		if (($_POST['action'] ?? '') !== 'bulk-upgrade') {
+			throw new \InvalidArgumentException('Invalid services action.');
+		}
+		$version = trim((string) ($_POST['version'] ?? ''));
+		if (!in_array($version, array_column($versions, 'version'), true)) {
+			throw new \InvalidArgumentException('Select an image version available on this controller.');
+		}
+		$available = [];
+		foreach ($services as $service) {
+			if (($service['state'] ?? '') === 'active') {
+				$available[(string) ($service['id'] ?? '')] = true;
+			}
+		}
+		$ids = [];
+		foreach ((array) ($_POST['services'] ?? []) as $id) {
+			if (is_string($id) && isset($available[$id])) {
+				$ids[] = $id;
+			}
+		}
+		if ($ids === []) {
+			throw new \InvalidArgumentException('Select at least one active service.');
+		}
+		echo '<h2>Bulk upgrade results</h2><table class="table"><tbody>';
+		foreach ($ids as $id) {
+			try {
+				$client->request('POST', '/v1/services/' . rawurlencode($id) . '/upgrade', [
+					'version' => $version,
+					'confirm_downgrade' => isset($_POST['confirm_downgrade']),
+				]);
+				echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-success">Success</td></tr>';
+			} catch (\Throwable $error) {
+				echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-danger">' . moddhosting_h($error->getMessage()) . '</td></tr>';
+			}
+		}
+		echo '</tbody></table>';
+		$services = $client->request('GET', '/v1/services')['services'] ?? [];
+	}
     $state = trim((string) ($_GET['state'] ?? ''));
     $version = trim((string) ($_GET['version'] ?? ''));
     $search = strtolower(trim((string) ($_GET['q'] ?? '')));
@@ -222,18 +305,23 @@ function moddhosting_services_page(array $vars): void
         $haystack = strtolower(($service['id'] ?? '') . ' ' . ($service['main_domain'] ?? '') . ' ' . ($service['staging_domain'] ?? ''));
         return $search === '' || str_contains($haystack, $search);
     });
-    echo '<h2>Services</h2><form method="get" class="form-inline">'
+	$serverID = (int) $server->id;
+    echo '<h2>Services — ' . moddhosting_h(moddhosting_server_name($server)) . '</h2><form method="get" class="form-inline">'
         . '<input type="hidden" name="module" value="moddhosting"><input type="hidden" name="page" value="services">'
+		. '<input type="hidden" name="server" value="' . $serverID . '">'
         . '<input class="form-control" name="q" placeholder="Domain or service ID" value="' . moddhosting_h($search) . '"> '
         . '<input class="form-control" name="state" placeholder="State" value="' . moddhosting_h($state) . '"> '
         . '<input class="form-control" name="version" placeholder="Version" value="' . moddhosting_h($version) . '"> '
         . '<button class="btn btn-default">Filter</button></form>';
-    echo '<table class="table table-striped"><thead><tr><th>ID</th><th>Domains</th><th>State</th><th>Deploy</th><th>Version</th><th>Running</th><th>Disk</th><th>Email</th><th>Traffic</th><th>Updated</th></tr></thead><tbody>';
+	echo '<form method="post"><input type="hidden" name="token" value="' . moddhosting_h(generate_token('plain')) . '">'
+		. '<input type="hidden" name="action" value="bulk-upgrade">'
+		. '<table class="table table-striped"><thead><tr><th>Select</th><th>ID</th><th>Domains</th><th>State</th><th>Deploy</th><th>Version</th><th>Running</th><th>Disk</th><th>Email</th><th>Traffic</th><th>Updated</th></tr></thead><tbody>';
     foreach ($services as $service) {
         $id = (string) $service['id'];
         $running = count(array_filter($service['containers'] ?? [], static fn(array $item): bool => !empty($item['running'])));
         $url = $vars['modulelink'] . '&page=service&id=' . rawurlencode($id);
-        echo '<tr><td><a href="' . moddhosting_h($url) . '">' . moddhosting_h($id) . '</a></td>'
+		$checkbox = ($service['state'] ?? '') === 'active' ? '<input type="checkbox" name="services[]" value="' . moddhosting_h($id) . '" aria-label="Select ' . moddhosting_h($id) . '">' : '';
+		echo '<tr><td>' . $checkbox . '</td><td><a href="' . moddhosting_h($url) . '">' . moddhosting_h($id) . '</a></td>'
             . '<td>' . moddhosting_h((string) ($service['main_domain'] ?? '')) . '<br><small>' . moddhosting_h((string) ($service['staging_domain'] ?? '')) . '</small></td>'
             . '<td>' . moddhosting_h((string) ($service['state'] ?? '')) . '</td>'
             . '<td>' . moddhosting_h((string) ($service['live_deploy'] ?? '')) . '</td>'
@@ -243,7 +331,13 @@ function moddhosting_services_page(array $vars): void
             . '<td>' . number_format((int) ($service['metrics']['monthly_traffic_bytes'] ?? 0)) . '</td>'
             . '<td>' . moddhosting_h((string) ($service['updated_at'] ?? '')) . '</td></tr>';
     }
-    echo '</tbody></table>';
+	echo '</tbody></table><fieldset><legend>Upgrade selected services</legend><label>Target version <select name="version" class="form-control" required>';
+	foreach ($versions as $version) {
+		$tag = (string) ($version['version'] ?? '');
+		echo '<option value="' . moddhosting_h($tag) . '">' . moddhosting_h($tag) . '</option>';
+	}
+	echo '</select></label><label><input type="checkbox" name="confirm_downgrade"> Confirm possible downgrades</label><br>'
+		. '<button class="btn btn-primary">Upgrade selected</button></fieldset></form>';
 }
 
 /** @param array<string, mixed> $vars */
@@ -292,48 +386,6 @@ function moddhosting_service_page(array $vars): void
     }
 }
 
-/** @param array<string, mixed> $vars */
-function moddhosting_bulk_page(array $vars): void
-{
-    $client = moddhosting_addon_client();
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        $version = trim((string) ($_POST['version'] ?? ''));
-        $confirm = isset($_POST['confirm_downgrade']);
-        $ids = array_values(array_filter((array) ($_POST['services'] ?? []), static fn(string $id): bool => preg_match('/^whmcs-[1-9][0-9]*$/', $id) === 1));
-        echo '<h2>Bulk upgrade results</h2><table class="table"><tbody>';
-        foreach ($ids as $id) {
-            try {
-                $client->request('POST', '/v1/services/' . rawurlencode($id) . '/upgrade', ['version' => $version, 'confirm_downgrade' => $confirm]);
-                echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-success">Success</td></tr>';
-            } catch (\Throwable $error) {
-                echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-danger">' . moddhosting_h($error->getMessage()) . '</td></tr>';
-            }
-        }
-        echo '</tbody></table>';
-        return;
-    }
-    $services = array_filter($client->request('GET', '/v1/services')['services'] ?? [], static fn(array $service): bool => ($service['state'] ?? '') === 'active');
-    $versions = $client->request('GET', '/v1/image/versions')['versions'] ?? [];
-    echo '<h2>Bulk upgrade</h2><p class="form-inline">'
-        . '<input class="form-control" id="bulk-search" placeholder="Domain or service ID" aria-label="Filter hosts"></p>'
-        . '<form method="post"><input type="hidden" name="token" value="' . moddhosting_h(generate_token('plain')) . '">'
-        . '<table class="table" id="bulk-services"><thead><tr><th>Service</th><th>Domains</th><th>Version</th></tr></thead><tbody>';
-    foreach ($services as $service) {
-        $search = strtolower(($service['id'] ?? '') . ' ' . ($service['main_domain'] ?? '') . ' ' . ($service['staging_domain'] ?? ''));
-        echo '<tr data-search="' . moddhosting_h($search) . '"><td><label><input type="checkbox" name="services[]" value="' . moddhosting_h((string) $service['id']) . '"> '
-            . moddhosting_h((string) $service['id']) . '</label></td>'
-            . '<td>' . moddhosting_h((string) ($service['main_domain'] ?? '')) . '<br><small>' . moddhosting_h((string) ($service['staging_domain'] ?? '')) . '</small></td>'
-            . '<td>' . moddhosting_h((string) $service['version']) . '</td></tr>';
-    }
-    echo '</tbody></table><select name="version" class="form-control">';
-    foreach ($versions as $version) {
-        echo '<option value="' . moddhosting_h((string) $version['version']) . '">' . moddhosting_h((string) $version['version']) . '</option>';
-    }
-    echo '</select><label><input type="checkbox" name="confirm_downgrade"> Confirm possible downgrades</label><br>'
-        . '<button class="btn btn-primary">Run sequentially</button></form>'
-        . '<script>document.getElementById("bulk-search").addEventListener("input",function(){var q=this.value.trim().toLowerCase();document.querySelectorAll("#bulk-services tbody tr").forEach(function(row){row.hidden=!row.dataset.search.includes(q);});});</script>';
-}
-
 function moddhosting_addon_client(): ApiClient
 {
     $server = Capsule::table('tblservers')->where('type', 'moddhosting')->where('active', 1)->orderBy('id')->first();
@@ -341,6 +393,34 @@ function moddhosting_addon_client(): ApiClient
         throw new \RuntimeException('No active Modd Hosting server is configured.');
     }
     return moddhosting_client_from_server($server);
+}
+
+/** @return iterable<object> */
+function moddhosting_servers(): iterable
+{
+	return Capsule::table('tblservers')->where('type', 'moddhosting')->orderBy('id')->get();
+}
+
+function moddhosting_selected_server(): object
+{
+	$selected = trim((string) ($_GET['server'] ?? ''));
+	$query = Capsule::table('tblservers')->where('type', 'moddhosting');
+	if ($selected !== '') {
+		if (preg_match('/^[1-9][0-9]*$/D', $selected) !== 1) {
+			throw new \InvalidArgumentException('Invalid controller server.');
+		}
+		$query->where('id', (int) $selected);
+	}
+	$server = $query->orderBy('id')->first();
+	if (!$server) {
+		throw new \RuntimeException('No matching Modd Hosting server is configured.');
+	}
+	return $server;
+}
+
+function moddhosting_server_name(object $server): string
+{
+	return trim((string) ($server->name ?? '')) ?: trim((string) ($server->hostname ?: $server->ipaddress));
 }
 
 function moddhosting_addon_client_for_id(string $id): ApiClient
@@ -377,11 +457,12 @@ function moddhosting_valid_id(string $id): string
 
 function moddhosting_nav(string $moduleLink): string
 {
-    $links = ['overview' => 'Overview', 'services' => 'Services', 'bulk' => 'Bulk upgrades', 'images' => 'Docker images'];
-    $html = '<p>';
-    foreach ($links as $page => $label) {
-        $html .= '<a class="btn btn-default" href="' . moddhosting_h($moduleLink . '&page=' . $page) . '">' . $label . '</a> ';
-    }
+	$html = '<p><a class="btn btn-default" href="' . moddhosting_h($moduleLink . '&page=overview') . '">Overview</a> ';
+	foreach (moddhosting_servers() as $server) {
+		$url = $moduleLink . '&page=services&server=' . (int) $server->id;
+		$html .= '<a class="btn btn-default" href="' . moddhosting_h($url) . '">Services — ' . moddhosting_h(moddhosting_server_name($server)) . '</a> ';
+	}
+	$html .= '<a class="btn btn-default" href="' . moddhosting_h($moduleLink . '&page=images') . '">Docker images</a> ';
     return $html . '</p>';
 }
 

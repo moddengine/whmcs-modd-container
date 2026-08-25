@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -39,6 +40,14 @@ type API struct {
 	Commit    string
 	BuildDate string
 	DockerAPI string
+	pullMu    sync.RWMutex
+	pull      imagePullStatus
+}
+
+type imagePullStatus struct {
+	Status  string `json:"status"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 func (a *API) Handler() http.Handler {
@@ -46,6 +55,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/health", a.health)
 	mux.HandleFunc("GET /v1/info", a.info)
 	mux.HandleFunc("GET /v1/image/versions", a.versions)
+	mux.HandleFunc("GET /v1/image/pull", a.pullImageStatus)
 	mux.HandleFunc("POST /v1/image/pull", a.pullImage)
 	mux.HandleFunc("GET /v1/services", a.list)
 	mux.HandleFunc("PUT /v1/services/{id}", a.provision)
@@ -113,20 +123,46 @@ func (a *API) pullImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	requestID := requestID(r)
-	go func() {
-		pulled, err := a.Manager.Docker.Pull(context.Background(), version)
-		if err != nil {
-			a.Logger.Error("image pull failed", "request_id", requestID, "version", version, "error", err)
-			return
-		}
-		a.Logger.Info("image pull completed", "request_id", requestID, "version", pulled.Version)
-	}()
 	queued := version
 	if queued == "" {
 		queued = "latest v*"
 	}
+	a.pullMu.Lock()
+	if a.pull.Status == "pending" {
+		a.pullMu.Unlock()
+		a.writeError(w, r, &service.Error{Code: "image_pull_pending", Status: 409, Err: errors.New("an image pull is already pending")})
+		return
+	}
+	a.pull = imagePullStatus{Status: "pending", Version: queued}
+	a.pullMu.Unlock()
+	requestID := requestID(r)
+	go func() {
+		pulled, err := a.Manager.Docker.Pull(context.Background(), version)
+		if err != nil {
+			a.setImagePullStatus(imagePullStatus{Status: "failed", Version: queued, Error: err.Error()})
+			a.Logger.Error("image pull failed", "request_id", requestID, "version", version, "error", err)
+			return
+		}
+		a.setImagePullStatus(imagePullStatus{Status: "completed", Version: pulled.Version})
+		a.Logger.Info("image pull completed", "request_id", requestID, "version", pulled.Version)
+	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "version": queued})
+}
+
+func (a *API) pullImageStatus(w http.ResponseWriter, _ *http.Request) {
+	a.pullMu.RLock()
+	status := a.pull
+	a.pullMu.RUnlock()
+	if status.Status == "" {
+		status.Status = "idle"
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (a *API) setImagePullStatus(status imagePullStatus) {
+	a.pullMu.Lock()
+	a.pull = status
+	a.pullMu.Unlock()
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {

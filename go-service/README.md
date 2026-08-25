@@ -21,7 +21,9 @@ certificate trusted by the WHMCS host. Confirm the image's mounts against
 For image pulls, set `docker.image_repository` to the Docker Hub
 `namespace/repository`. `POST /v1/image/pull` with an empty `version` finds the
 most recently pushed `v*` tag; a non-empty value pulls that exact tag. The
-endpoint returns `202` immediately and logs the background pull result.
+endpoint returns `202` immediately. `GET /v1/image/pull` reports its in-memory
+pending, completed, or failed state. Private tag discovery reuses the Docker
+CLI username and password or access token configured by `docker login`.
 
 The example binds to `127.0.0.1`. For containerized Caddy, use host networking
 or bind the controller to a firewall-restricted address on Caddy's network.

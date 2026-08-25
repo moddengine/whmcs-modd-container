@@ -28,7 +28,7 @@ import (
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 )
 
-const dockerHubAPI = "https://hub.docker.com/v2/namespaces"
+const dockerHubAPI = "https://hub.docker.com/v2"
 
 const (
 	managedLabel = "au.modd.managed"
@@ -286,8 +286,12 @@ func (a *Adapter) HasVersion(ctx context.Context, version string) (bool, error) 
 
 func (a *Adapter) Pull(ctx context.Context, version string) (model.ImageVersion, error) {
 	if version == "" {
+		credentials, credentialsErr := a.registryCredentials(a.cfg.ImageRepository)
+		if credentialsErr != nil {
+			return model.ImageVersion{}, credentialsErr
+		}
 		var err error
-		version, err = latestHubVersion(ctx, http.DefaultClient, dockerHubAPI, a.cfg.ImageRepository)
+		version, err = latestHubVersion(ctx, http.DefaultClient, dockerHubAPI, a.cfg.ImageRepository, credentials.Username, credentials.Password)
 		if err != nil {
 			return model.ImageVersion{}, err
 		}
@@ -322,32 +326,40 @@ func (a *Adapter) Pull(ctx context.Context, version string) (model.ImageVersion,
 }
 
 func (a *Adapter) registryAuth(imageReference string) (string, error) {
-	cfg, err := dockerconfig.Load(a.configDir)
+	auth, err := a.registryCredentials(imageReference)
 	if err != nil {
-		return "", fmt.Errorf("load Docker config: %w", err)
-	}
-	named, err := reference.ParseNormalizedNamed(imageReference)
-	if err != nil {
-		return "", fmt.Errorf("resolve image registry: %w", err)
-	}
-	auth, err := cfg.GetAuthConfig(reference.Domain(named))
-	if err != nil {
-		return "", fmt.Errorf("load Docker credentials for registry %q: %w", reference.Domain(named), err)
+		return "", err
 	}
 	if auth.Username == "" && auth.Password == "" && auth.Auth == "" && auth.IdentityToken == "" && auth.RegistryToken == "" {
 		return "", nil
 	}
-	encoded, err := registry.EncodeAuthConfig(registry.AuthConfig{
-		Username: auth.Username, Password: auth.Password, Auth: auth.Auth,
-		ServerAddress: auth.ServerAddress, IdentityToken: auth.IdentityToken, RegistryToken: auth.RegistryToken,
-	})
+	encoded, err := registry.EncodeAuthConfig(auth)
 	if err != nil {
 		return "", fmt.Errorf("encode Docker registry credentials: %w", err)
 	}
 	return encoded, nil
 }
 
-func latestHubVersion(ctx context.Context, client *http.Client, baseURL, repository string) (string, error) {
+func (a *Adapter) registryCredentials(imageReference string) (registry.AuthConfig, error) {
+	cfg, err := dockerconfig.Load(a.configDir)
+	if err != nil {
+		return registry.AuthConfig{}, fmt.Errorf("load Docker config: %w", err)
+	}
+	named, err := reference.ParseNormalizedNamed(imageReference)
+	if err != nil {
+		return registry.AuthConfig{}, fmt.Errorf("resolve image registry: %w", err)
+	}
+	auth, err := cfg.GetAuthConfig(reference.Domain(named))
+	if err != nil {
+		return registry.AuthConfig{}, fmt.Errorf("load Docker credentials for registry %q: %w", reference.Domain(named), err)
+	}
+	return registry.AuthConfig{
+		Username: auth.Username, Password: auth.Password, Auth: auth.Auth,
+		ServerAddress: auth.ServerAddress, IdentityToken: auth.IdentityToken, RegistryToken: auth.RegistryToken,
+	}, nil
+}
+
+func latestHubVersion(ctx context.Context, client *http.Client, baseURL, repository, username, secret string) (string, error) {
 	repository = strings.TrimPrefix(repository, "docker.io/")
 	repository = strings.TrimPrefix(repository, "index.docker.io/")
 	parts := strings.Split(repository, "/")
@@ -357,13 +369,44 @@ func latestHubVersion(ctx context.Context, client *http.Client, baseURL, reposit
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", fmt.Errorf("image repository %q is not a Docker Hub namespace/repository", repository)
 	}
+	token := ""
+	if username != "" || secret != "" {
+		if username == "" || secret == "" {
+			return "", errors.New("Docker Hub tag lookup requires both a username and password or access token")
+		}
+		body, err := json.Marshal(map[string]string{"identifier": username, "secret": secret})
+		if err != nil {
+			return "", err
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/auth/token", strings.NewReader(string(body)))
+		if err != nil {
+			return "", err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			return "", fmt.Errorf("authenticate with Docker Hub: %w", err)
+		}
+		var auth struct {
+			AccessToken string `json:"access_token"`
+		}
+		err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&auth)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || err != nil || auth.AccessToken == "" {
+			return "", fmt.Errorf("Docker Hub authentication failed with %s", response.Status)
+		}
+		token = auth.AccessToken
+	}
 	var newest string
 	var newestAt time.Time
 	for page := 1; ; page++ {
-		endpoint := fmt.Sprintf("%s/%s/repositories/%s/tags?page=%d&page_size=100", baseURL, url.PathEscape(parts[0]), url.PathEscape(parts[1]), page)
+		endpoint := fmt.Sprintf("%s/namespaces/%s/repositories/%s/tags?page=%d&page_size=100", baseURL, url.PathEscape(parts[0]), url.PathEscape(parts[1]), page)
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return "", err
+		}
+		if token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
 		}
 		response, err := client.Do(request)
 		if err != nil {
