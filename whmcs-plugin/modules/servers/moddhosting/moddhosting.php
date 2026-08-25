@@ -136,6 +136,8 @@ function moddhosting_AdminServicesTabFields(array $params): array
         };
         $dnsSyncedAt = (string) ($status['dns_synced_at'] ?? '');
         return [
+            'Staging Hostname' => '<input type="text" name="modulefields[0]" size="40" value="'
+                . moddhosting_escape($requestedStaging) . '" placeholder="Blank for automatic derivation">',
             'Deployed Hostname' => moddhosting_escape($deployedHost !== '' ? $deployedHost : 'not provisioned'),
             'Deployed Staging Hostname' => moddhosting_escape($deployedStaging !== '' ? $deployedStaging : 'not provisioned'),
             'Hostname Status' => $hostnameStatus,
@@ -154,6 +156,14 @@ function moddhosting_AdminServicesTabFields(array $params): array
     } catch (\Throwable $error) {
         return ['Controller Error' => moddhosting_escape($error->getMessage())];
     }
+}
+
+/** @param array<string, mixed> $params */
+function moddhosting_AdminServicesTabFieldsSave(array $params): void
+{
+    $fields = $_POST['modulefields'] ?? [];
+    $staging = is_array($fields) ? trim((string) ($fields[0] ?? '')) : '';
+    $params['model']->serviceProperties->save(['Staging Hostname' => $staging]);
 }
 
 /**
