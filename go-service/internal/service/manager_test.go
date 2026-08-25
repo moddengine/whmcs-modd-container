@@ -413,7 +413,11 @@ func TestReconnectDNSRejectsDisabledAndMissingServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := Manager{Repo: repo}
-	for id, wantStatus := range map[string]int{"whmcs-123": http.StatusConflict, "whmcs-999": http.StatusNotFound} {
+	for _, test := range []struct {
+		id         string
+		wantStatus int
+	}{{"whmcs-123", http.StatusConflict}, {"whmcs-999", http.StatusNotFound}} {
+		id, wantStatus := test.id, test.wantStatus
 		if id == "whmcs-999" {
 			manager.Config.DNSWebhook.URL = "https://dns.example/hook"
 		}
