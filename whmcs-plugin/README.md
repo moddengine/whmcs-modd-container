@@ -27,6 +27,8 @@ data. Permanent purging, upgrades, bulk upgrades, and status live in
 **Addons > Modd Hosting**. The service's **Deploy** action applies its current
 hostname, staging hostname, IP, and image version, then restores a terminated
 service with its retained data.
+The service page also shows the latest DNS status, error, and successful sync
+time; use **Reconnect DNS** there to queue the current domain and IP again.
 
 Static analysis:
 

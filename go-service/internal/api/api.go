@@ -53,6 +53,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/services/{id}/suspend", a.suspend)
 	mux.HandleFunc("POST /v1/services/{id}/resume", a.resume)
 	mux.HandleFunc("POST /v1/services/{id}/terminate", a.terminate)
+	mux.HandleFunc("POST /v1/services/{id}/dns/reconnect", a.reconnectDNS)
 	mux.HandleFunc("DELETE /v1/services/{id}", a.delete)
 	mux.HandleFunc("POST /v1/services/{id}/upgrade", a.upgrade)
 	mux.HandleFunc("POST /v1/services/{id}/monitor-token", a.monitorToken)
@@ -170,6 +171,14 @@ func (a *API) resume(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) terminate(w http.ResponseWriter, r *http.Request) {
 	a.action(w, r, a.Manager.Terminate)
+}
+
+func (a *API) reconnectDNS(w http.ResponseWriter, r *http.Request) {
+	if err := a.Manager.ReconnectDNS(r.PathValue("id")); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
 func (a *API) action(w http.ResponseWriter, r *http.Request, fn func(context.Context, string, string) (*model.Status, bool, error)) {

@@ -220,6 +220,8 @@ place for diagnosis.
 
 DNS updates run after healthy routing without blocking the site. Failures are
 recorded in service status and retried twice after 30 seconds and 5 minutes.
+Administrators can queue the current domain and IPv4 again with
+`POST /v1/services/{id}/dns/reconnect`.
 
 ### Notifications and logging
 

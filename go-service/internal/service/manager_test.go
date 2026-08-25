@@ -353,6 +353,71 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	}
 }
 
+func TestReconnectDNSQueuesRepeatedRequests(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{ID: "whmcs-123", MainDomain: "example.com", PublicIPv4: "203.0.113.10", DNSStatus: "error", DNSLastError: "previous failure"}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan struct{}, 2), make(chan struct{}, 2)
+	manager := Manager{
+		Repo: repo, dnsBackoffs: []time.Duration{0},
+		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			started <- struct{}{}
+			<-release
+			return &http.Response{StatusCode: http.StatusNoContent, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		})},
+	}
+	if err := manager.ReconnectDNS(service.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ReconnectDNS(service.ID); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	<-started
+	queued, _ := repo.Get(service.ID)
+	if queued.DNSStatus != "pending" || queued.DNSLastError != "" {
+		t.Fatalf("queued DNS state = %#v", queued)
+	}
+	release <- struct{}{}
+	release <- struct{}{}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		queued, _ = repo.Get(service.ID)
+		if queued.DNSStatus == "in_sync" {
+			return
+		}
+	}
+	t.Fatalf("reconnected DNS state = %#v", queued)
+}
+
+func TestReconnectDNSRejectsDisabledAndMissingServices(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Put(model.Service{ID: "whmcs-123"}); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Repo: repo}
+	for id, wantStatus := range map[string]int{"whmcs-123": http.StatusConflict, "whmcs-999": http.StatusNotFound} {
+		if id == "whmcs-999" {
+			manager.Config.DNSWebhook.URL = "https://dns.example/hook"
+		}
+		err := manager.ReconnectDNS(id)
+		var apiErr *Error
+		if !errors.As(err, &apiErr) || apiErr.Status != wantStatus {
+			t.Fatalf("ReconnectDNS(%q) error = %v", id, err)
+		}
+	}
+}
+
 func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
 	root := t.TempDir()
 	socket := filepath.Join(root, "health.sock")

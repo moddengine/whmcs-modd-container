@@ -831,6 +831,20 @@ func (m *Manager) queueDNS(service model.Service) (model.Service, error) {
 	return latest, nil
 }
 
+func (m *Manager) ReconnectDNS(id string) error {
+	service, err := m.liveService(id)
+	if err != nil {
+		return err
+	}
+	if !m.dnsEnabled() {
+		return conflict(errors.New("DNS updates are disabled"))
+	}
+	if _, err := m.queueDNS(service); err != nil {
+		return internal(err)
+	}
+	return nil
+}
+
 func (m *Manager) dnsEnabled() bool { return m.Config.DNSWebhook.URL != "" }
 
 func (m *Manager) syncDNS(id, domain, publicIPv4 string) {

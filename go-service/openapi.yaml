@@ -163,6 +163,23 @@ paths:
         "200": { $ref: "#/components/responses/ServiceStatus" }
         "202": { $ref: "#/components/responses/ServiceStatus" }
         "409": { $ref: "#/components/responses/Error" }
+  /v1/services/{id}/dns/reconnect:
+    post:
+      summary: Queue a DNS webhook update
+      description: Requeues the service's current main domain and public IPv4 even when its DNS status is already pending or in sync.
+      operationId: reconnectServiceDNS
+      parameters: [{ $ref: "#/components/parameters/ServiceID" }]
+      responses:
+        "202":
+          description: DNS update queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, const: queued } }
+                required: [status]
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/services/{id}/upgrade:
     post:
       summary: Deploy an image version using blue-green switching
