@@ -122,7 +122,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     put:
       summary: Provision or reconcile a service
-      description: Existing active services reconcile domains and image version; suspended services reconcile domains only.
+      description: Existing active services reconcile domains and image version; force_redeploy recreates the selected version through blue-green deployment. Suspended services reconcile domains only.
       operationId: provisionService
       requestBody:
         required: true
@@ -276,6 +276,7 @@ components:
         public_ipv4: { type: string, format: ipv4 }
         version: { type: string, minLength: 1 }
         display_name: { type: string }
+        force_redeploy: { type: boolean, default: false }
       required: [main_domain, public_ipv4, version]
     UpgradeRequest:
       type: object

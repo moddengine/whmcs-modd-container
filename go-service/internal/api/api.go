@@ -94,7 +94,7 @@ func (a *API) info(w http.ResponseWriter, r *http.Request) {
 		"version": a.Version, "commit": a.Commit, "build_date": a.BuildDate,
 		"docker_api_version": a.DockerAPI, "zfs_prefix": a.Config.ZFS.DatasetPrefix,
 		"services_dir": a.Config.State.ServicesDir, "caddy_service_config_dir": a.Config.Caddy.ServiceConfigDir,
-		"traffic_drain": a.Config.Deployment.TrafficDrain.String(), "metrics_provider": "mock",
+		"traffic_drain": a.Config.Deployment.TrafficDrain.String(), "staging_suffix": a.Config.Domains.StagingSuffix, "metrics_provider": "mock",
 		"service_counts": counts,
 	})
 }

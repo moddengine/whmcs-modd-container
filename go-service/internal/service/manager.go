@@ -139,7 +139,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	}
 	m.mu.Unlock()
 	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.PublicIPv4 == publicIPv4 && existing.Version == req.Version) {
-		return m.reconcile(ctx, id, mainDomain, stagingDomain, publicIPv4, req.Version, req.DisplayName, requestID)
+		return m.reconcile(ctx, id, mainDomain, stagingDomain, publicIPv4, req.Version, req.DisplayName, requestID, req.ForceRedeploy)
 	}
 	if existingErr != nil && !errors.Is(existingErr, state.ErrNotFound) {
 		return nil, false, internal(existingErr)
@@ -247,7 +247,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	return status, true, err
 }
 
-func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, publicIPv4, version, displayName, requestID string) (*model.Status, bool, error) {
+func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, publicIPv4, version, displayName, requestID string, forceRedeploy bool) (*model.Status, bool, error) {
 	m.mu.Lock()
 	service, err := m.liveService(id)
 	if err != nil {
@@ -260,8 +260,8 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 	m.mu.Unlock()
 
 	if state == model.Active {
-		if !sameVersion {
-			return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4)
+		if !sameVersion || forceRedeploy {
+			return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4, forceRedeploy)
 		}
 		if phase != "running" {
 			return nil, false, conflict(fmt.Errorf("cannot deploy hostname while service is %s", phase))
@@ -564,10 +564,10 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) (*model.Tomb
 }
 
 func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID string) (*model.Status, bool, error) {
-	return m.upgrade(ctx, id, req, requestID, "", "", "")
+	return m.upgrade(ctx, id, req, requestID, "", "", "", false)
 }
 
-func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID, targetMainDomain, targetStagingDomain, targetPublicIPv4 string) (*model.Status, bool, error) {
+func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID, targetMainDomain, targetStagingDomain, targetPublicIPv4 string, forceRedeploy bool) (*model.Status, bool, error) {
 	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
 		return nil, false, badRequest(err)
 	}
@@ -578,7 +578,7 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		return nil, false, err
 	}
 	derive(&service)
-	done, validationErr := validateUpgrade(service, req)
+	done, validationErr := validateUpgrade(service, req, forceRedeploy)
 	m.mu.Unlock()
 	if validationErr != nil {
 		return nil, false, validationErr
@@ -605,7 +605,7 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		return nil, false, err
 	}
 	derive(&service)
-	done, validationErr = validateUpgrade(service, req)
+	done, validationErr = validateUpgrade(service, req, forceRedeploy)
 	if validationErr != nil {
 		m.mu.Unlock()
 		return nil, false, validationErr
@@ -672,7 +672,7 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 	return status, true, err
 }
 
-func validateUpgrade(service model.Service, req model.UpgradeRequest) (bool, error) {
+func validateUpgrade(service model.Service, req model.UpgradeRequest, forceRedeploy bool) (bool, error) {
 	if service.State != model.Active {
 		return false, conflict(errors.New("only active services can be upgraded"))
 	}
@@ -682,7 +682,7 @@ func validateUpgrade(service model.Service, req model.UpgradeRequest) (bool, err
 	if busy(service.Phase) {
 		return false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
 	}
-	if req.Version == service.Version {
+	if req.Version == service.Version && !forceRedeploy {
 		return true, nil
 	}
 	cmp, ordered := compareVersions(req.Version, service.Version)

@@ -39,6 +39,7 @@ function moddhosting_CreateAccount(array $params): string
 			'public_ipv4' => trim((string) $params['serverip']),
             'version' => moddhosting_selected_version($params),
             'display_name' => 'WHMCS service ' . (int) $params['serviceid'],
+            'force_redeploy' => (bool) ($params['force_redeploy'] ?? false),
         ]);
     } catch (\Throwable $error) {
         return $error->getMessage();
@@ -54,6 +55,7 @@ function moddhosting_AdminCustomButtonArray(): array
 /** @param array<string, mixed> $params */
 function moddhosting_deploy(array $params): string
 {
+    $params['force_redeploy'] = true;
     return moddhosting_CreateAccount($params);
 }
 
@@ -103,8 +105,18 @@ function moddhosting_AdminServicesTabFields(array $params): array
 {
     try {
         $client = moddhosting_client($params);
-        moddhosting_selected_version($params);
-        $requestedStaging = moddhosting_selected_staging($params);
+        $versions = moddhosting_versions($params);
+        $selectedVersion = moddhosting_selected_version($params, $versions);
+        $versionOptions = '';
+        foreach ($versions as $version) {
+            $tag = (string) $version['version'];
+            $versionOptions .= '<option value="' . moddhosting_escape($tag) . '"' . ($tag === $selectedVersion ? ' selected' : '') . '>'
+                . moddhosting_escape($tag) . '</option>';
+        }
+        $info = $client->request('GET', '/v1/info');
+        $stagingSuffix = moddhosting_staging_suffix($params, $info);
+        $requestedStaging = moddhosting_selected_staging($params, $stagingSuffix);
+        $stagingLabel = $requestedStaging === '' ? '' : substr($requestedStaging, 0, -strlen('.' . $stagingSuffix));
         try {
             $status = $client->request('GET', '/v1/services/' . moddhosting_service_id($params));
         } catch (ApiException $error) {
@@ -136,8 +148,10 @@ function moddhosting_AdminServicesTabFields(array $params): array
         };
         $dnsSyncedAt = (string) ($status['dns_synced_at'] ?? '');
         return [
-            'Staging Hostname' => '<input type="text" name="modulefields[0]" size="40" value="'
-                . moddhosting_escape($requestedStaging) . '" placeholder="Blank for automatic derivation">',
+            'Image Version' => '<select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
+            'Staging Hostname' => '<div class="input-group" style="max-width:500px"><input type="text" name="modulefields[1]" class="form-control" maxlength="32" value="'
+                . moddhosting_escape($stagingLabel) . '" placeholder="Blank for automatic derivation"><span class="input-group-addon">.'
+                . moddhosting_escape($stagingSuffix) . '</span></div>',
             'Deployed Hostname' => moddhosting_escape($deployedHost !== '' ? $deployedHost : 'not provisioned'),
             'Deployed Staging Hostname' => moddhosting_escape($deployedStaging !== '' ? $deployedStaging : 'not provisioned'),
             'Hostname Status' => $hostnameStatus,
@@ -162,8 +176,15 @@ function moddhosting_AdminServicesTabFields(array $params): array
 function moddhosting_AdminServicesTabFieldsSave(array $params): void
 {
     $fields = $_POST['modulefields'] ?? [];
-    $staging = is_array($fields) ? trim((string) ($fields[0] ?? '')) : '';
-    $params['model']->serviceProperties->save(['Staging Hostname' => $staging]);
+    $version = is_array($fields) ? trim((string) ($fields[0] ?? '')) : '';
+    if (!in_array($version, array_column(moddhosting_versions($params), 'version'), true)) {
+        throw new \InvalidArgumentException('Select an image version available from the controller.');
+    }
+    $staging = strtolower(trim((string) ($fields[1] ?? '')));
+    if ($staging !== '' && !moddhosting_valid_staging_label($staging)) {
+        throw new \InvalidArgumentException('Staging hostname must be a valid DNS label of at most 32 characters.');
+    }
+    $params['model']->serviceProperties->save(['Image Version' => $version, 'Staging Hostname' => $staging]);
 }
 
 /**
@@ -264,10 +285,13 @@ function moddhosting_versions(array $params): array
     return array_values($versions);
 }
 
-/** @param array<string, mixed> $params */
-function moddhosting_selected_version(array $params): string
+/**
+ * @param array<string, mixed> $params
+ * @param list<array<string, mixed>>|null $versions
+ */
+function moddhosting_selected_version(array $params, ?array $versions = null): string
 {
-    $versions = moddhosting_versions($params);
+    $versions ??= moddhosting_versions($params);
     $version = trim((string) ($params['model']->serviceProperties->get('Image Version') ?? ''));
     if ($version === '') {
         $version = (string) $versions[0]['version'];
@@ -279,12 +303,40 @@ function moddhosting_selected_version(array $params): string
     return $version;
 }
 
-/** @param array<string, mixed> $params */
-function moddhosting_selected_staging(array $params): string
+/**
+ * @param array<string, mixed> $params
+ * @param array<string, mixed>|null $info
+ */
+function moddhosting_staging_suffix(array $params, ?array $info = null): string
 {
-    $staging = trim((string) ($params['model']->serviceProperties->get('Staging Hostname') ?? ''));
-    $params['model']->serviceProperties->save(['Staging Hostname' => $staging]);
-    return $staging;
+    $info ??= moddhosting_client($params)->request('GET', '/v1/info');
+    $suffix = strtolower(trim((string) ($info['staging_suffix'] ?? ''), '.'));
+    if ($suffix === '') {
+        throw new \RuntimeException('The controller did not provide its staging hostname suffix.');
+    }
+    return $suffix;
+}
+
+/** @param array<string, mixed> $params */
+function moddhosting_selected_staging(array $params, ?string $suffix = null): string
+{
+    $staging = strtolower(trim((string) ($params['model']->serviceProperties->get('Staging Hostname') ?? ''), '.'));
+    if ($staging === '') {
+        return '';
+    }
+    $suffix ??= moddhosting_staging_suffix($params);
+    if (str_ends_with($staging, '.' . $suffix)) {
+        return $staging;
+    }
+    if (!moddhosting_valid_staging_label($staging)) {
+        throw new \InvalidArgumentException('Staging hostname must be a valid DNS label of at most 32 characters.');
+    }
+    return $staging . '.' . $suffix;
+}
+
+function moddhosting_valid_staging_label(string $label): bool
+{
+    return strlen($label) <= 32 && preg_match('/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/D', $label) === 1;
 }
 
 /** @param array<string, mixed> $params */

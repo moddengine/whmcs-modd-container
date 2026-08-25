@@ -208,8 +208,15 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 	if _, ordered := compareVersions("latest", "v21.6.24"); ordered {
 		t.Fatal("unordered tag was treated as ordered")
 	}
-	if _, err := validateUpgrade(model.Service{State: model.Active, Phase: "running", Version: "v2"}, model.UpgradeRequest{Version: "v1"}); err == nil {
+	service := model.Service{State: model.Active, Phase: "running", Version: "v2"}
+	if _, err := validateUpgrade(service, model.UpgradeRequest{Version: "v1"}, false); err == nil {
 		t.Fatal("Create-style upgrade accepted a downgrade without confirmation")
+	}
+	if done, err := validateUpgrade(service, model.UpgradeRequest{Version: "v2"}, false); err != nil || !done {
+		t.Fatalf("ordinary same-version reconcile was not idempotent: done=%t err=%v", done, err)
+	}
+	if done, err := validateUpgrade(service, model.UpgradeRequest{Version: "v2"}, true); err != nil || done {
+		t.Fatalf("forced same-version deploy was treated as complete: done=%t err=%v", done, err)
 	}
 }
 

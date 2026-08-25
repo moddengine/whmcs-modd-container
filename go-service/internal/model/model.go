@@ -15,6 +15,7 @@ type ProvisionRequest struct {
 	PublicIPv4    string `json:"public_ipv4"`
 	Version       string `json:"version"`
 	DisplayName   string `json:"display_name,omitempty"`
+	ForceRedeploy bool   `json:"force_redeploy,omitempty"`
 }
 
 type UpgradeRequest struct {

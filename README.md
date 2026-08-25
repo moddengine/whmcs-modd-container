@@ -252,8 +252,8 @@ In WHMCS:
 4. Store the bearer token as the server password.
 5. Create a product using that server.
 6. On each service, enter an available controller image tag in **Image Version**.
-7. Leave **Staging Hostname** blank for automatic derivation, or enter an
-   explicit hostname.
+7. Leave **Staging Hostname** blank for automatic derivation, or enter a label
+   of up to 32 characters; the controller's staging suffix is appended.
 8. Activate **Modd Hosting** under addon modules and restrict it to trusted
    administrator roles.
 9. Set a unique **Docker Hub Webhook Token**, then copy the webhook URL from
