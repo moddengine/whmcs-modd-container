@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use ModdHosting\ApiClient;
+use Illuminate\Database\Schema\Blueprint;
 use WHMCS\Database\Capsule;
 
 if (!defined('WHMCS')) {
@@ -35,13 +36,70 @@ function moddhosting_config(): array
 /** @return array<string, mixed> */
 function moddhosting_activate(): array
 {
-    return ['status' => 'success', 'description' => 'Modd Hosting addon activated'];
+    try {
+        moddhosting_install();
+        return ['status' => 'success', 'description' => 'Modd Hosting addon activated'];
+    } catch (\Throwable $error) {
+        return ['status' => 'error', 'description' => $error->getMessage()];
+    }
 }
 
 /** @return array<string, mixed> */
 function moddhosting_deactivate(): array
 {
     return ['status' => 'success', 'description' => 'Modd Hosting addon deactivated'];
+}
+
+/** @param array<string, mixed> $vars */
+function moddhosting_upgrade(array $vars): void
+{
+    moddhosting_install();
+}
+
+function moddhosting_install(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_moddhosting_services')) {
+        $schema->create('mod_moddhosting_services', static function (Blueprint $table): void {
+            $table->unsignedInteger('service_id')->primary();
+            $table->string('image_version', 128)->default('');
+            $table->string('staging_label', 32)->default('');
+        });
+    } elseif (!$schema->hasColumn('mod_moddhosting_services', 'image_version')) {
+        $schema->table('mod_moddhosting_services', static function (Blueprint $table): void {
+            $table->string('image_version', 128)->default('');
+        });
+    }
+
+    $fields = Capsule::table('tblcustomfields')
+        ->join('tblproducts', 'tblproducts.id', '=', 'tblcustomfields.relid')
+        ->where('tblcustomfields.type', 'product')
+        ->where('tblproducts.servertype', 'moddhosting')
+        ->whereIn('tblcustomfields.fieldname', ['Image Version', 'Staging Hostname'])
+        ->select('tblcustomfields.id', 'tblcustomfields.relid', 'tblcustomfields.fieldname')
+        ->get();
+    Capsule::connection()->transaction(static function () use ($fields): void {
+        foreach ($fields as $field) {
+            $values = Capsule::table('tblcustomfieldsvalues')->where('fieldid', (int) $field->id)->get();
+            if ($field->fieldname === 'Staging Hostname') {
+                foreach ($values as $value) {
+                    Capsule::table('mod_moddhosting_services')->updateOrInsert(
+                        ['service_id' => (int) $value->relid],
+                        ['staging_label' => strtolower(trim((string) $value->value, '.'))],
+                    );
+                }
+            } else {
+                foreach ($values as $value) {
+                    Capsule::table('mod_moddhosting_services')->updateOrInsert(
+                        ['service_id' => (int) $value->relid],
+                        ['image_version' => trim((string) $value->value)],
+                    );
+                }
+            }
+            Capsule::table('tblcustomfieldsvalues')->where('fieldid', (int) $field->id)->delete();
+            Capsule::table('tblcustomfields')->where('id', (int) $field->id)->delete();
+        }
+    });
 }
 
 /** @param array<string, mixed> $vars */

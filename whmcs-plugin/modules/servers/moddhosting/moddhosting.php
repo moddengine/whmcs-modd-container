@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use ModdHosting\ApiClient;
 use ModdHosting\ApiException;
+use WHMCS\Database\Capsule;
 
 if (!defined('WHMCS')) {
     exit('This file cannot be accessed directly');
@@ -184,7 +185,10 @@ function moddhosting_AdminServicesTabFieldsSave(array $params): void
     if ($staging !== '' && !moddhosting_valid_staging_label($staging)) {
         throw new \InvalidArgumentException('Staging hostname must be a valid DNS label of at most 32 characters.');
     }
-    $params['model']->serviceProperties->save(['Image Version' => $version, 'Staging Hostname' => $staging]);
+    Capsule::table('mod_moddhosting_services')->updateOrInsert(
+        ['service_id' => (int) $params['serviceid']],
+        ['image_version' => $version, 'staging_label' => $staging],
+    );
 }
 
 /**
@@ -292,10 +296,14 @@ function moddhosting_versions(array $params): array
 function moddhosting_selected_version(array $params, ?array $versions = null): string
 {
     $versions ??= moddhosting_versions($params);
-    $version = trim((string) ($params['model']->serviceProperties->get('Image Version') ?? ''));
+    $version = trim((string) (Capsule::table('mod_moddhosting_services')
+        ->where('service_id', (int) $params['serviceid'])->value('image_version') ?? ''));
     if ($version === '') {
         $version = (string) $versions[0]['version'];
-        $params['model']->serviceProperties->save(['Image Version' => $version]);
+        Capsule::table('mod_moddhosting_services')->updateOrInsert(
+            ['service_id' => (int) $params['serviceid']],
+            ['image_version' => $version],
+        );
     }
     if (!in_array($version, array_column($versions, 'version'), true)) {
         throw new \InvalidArgumentException('The service image version is not available from the controller.');
@@ -320,7 +328,8 @@ function moddhosting_staging_suffix(array $params, ?array $info = null): string
 /** @param array<string, mixed> $params */
 function moddhosting_selected_staging(array $params, ?string $suffix = null): string
 {
-    $staging = strtolower(trim((string) ($params['model']->serviceProperties->get('Staging Hostname') ?? ''), '.'));
+    $staging = strtolower(trim((string) (Capsule::table('mod_moddhosting_services')
+        ->where('service_id', (int) $params['serviceid'])->value('staging_label') ?? ''), '.'));
     if ($staging === '') {
         return '';
     }

@@ -10,10 +10,12 @@ Create a WHMCS server using module `Modd Container Hosting`:
 - password: shared bearer token (WHMCS stores this encrypted).
 
 Choose the image version on each service's admin page; choices come from the
-controller with the most recent image first. Save the service before running
-Create for initial provisioning or Deploy to reconcile its hostname and image.
+selected controller with the most recent image first. Save the service before
+running Create for initial provisioning or Deploy to reconcile its hostname and image.
 The staging hostname field accepts a label of up to 32 characters and displays
-the controller's configured suffix beside it.
+the controller's configured suffix beside it. Per-service image versions and
+staging labels are kept in `mod_moddhosting_services`, not customer-visible
+custom fields.
 The service page shows the hostname currently deployed by the controller and
 whether it matches WHMCS. Activate the `Modd Hosting` addon and grant access
 only to administrator roles that may perform hosting lifecycle actions.
