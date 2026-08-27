@@ -145,9 +145,9 @@ password.
 | `state.tombstones_dir` | Records retained after permanent deletion. |
 | `state.templates_dir` | Optional `conf.json` and `plug.json` templates. |
 
-If a template file is absent, the controller creates that service file with
-an empty JSON object. Back up the services and tombstones directories; site
-content follows the ZFS pool's snapshot and replication policy.
+If a template file is absent, the controller leaves that service file absent.
+Back up the services and tombstones directories; site content follows the ZFS
+pool's snapshot and replication policy.
 
 ### Caddy
 

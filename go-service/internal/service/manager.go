@@ -1230,10 +1230,13 @@ func (m *Manager) createSkeleton(service model.Service) error {
 	for _, name := range []string{"conf.json", "plug.json"} {
 		path := filepath.Join(service.Dataset.Mountpoint, "site", name)
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-			content := []byte("{}\n")
 			templatePath := filepath.Join(m.Config.State.TemplatesDir, name)
-			if template, readErr := os.ReadFile(templatePath); readErr == nil {
-				content = template
+			content, readErr := os.ReadFile(templatePath)
+			if errors.Is(readErr, os.ErrNotExist) {
+				continue
+			}
+			if readErr != nil {
+				return readErr
 			}
 			if err := os.WriteFile(path, content, 0640); err != nil {
 				return err

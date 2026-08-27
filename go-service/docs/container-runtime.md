@@ -102,8 +102,8 @@ image version, and display name.
    green/{cache,run,debug}
    ```
 
-   `conf.json` and `plug.json` come from `state.templates_dir` when available;
-   otherwise they contain `{}`. Existing files are preserved.
+   `conf.json` and `plug.json` come from `state.templates_dir` when available.
+   Without a template they are not created. Existing files are preserved.
 6. It creates or verifies the host user/group, recursively assigns the dataset
    and socket directories to that identity, and refuses conflicting UID/GID
    assignments.
