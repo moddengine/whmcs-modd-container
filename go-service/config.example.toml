@@ -13,7 +13,6 @@ mount_prefix = "/modd/sites"
 [state]
 services_dir = "/var/lib/modd-hosting/services"
 tombstones_dir = "/var/lib/modd-hosting/tombstones"
-templates_dir = "/etc/modd-hosting/templates"
 
 [caddy]
 service_config_dir = "/var/lib/modd-hosting/caddy/services"
