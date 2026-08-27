@@ -489,6 +489,26 @@ func TestDeploymentContainerName(t *testing.T) {
 	}
 }
 
+func TestCreateSkeletonSkipsMissingConfigTemplates(t *testing.T) {
+	root := t.TempDir()
+	service := model.Service{
+		Dataset: model.DatasetRecord{Mountpoint: filepath.Join(root, "service")},
+		Deploy: map[string]model.Deploy{
+			"blue":  {Socket: filepath.Join(root, "sockets", "blue.sock")},
+			"green": {Socket: filepath.Join(root, "sockets", "green.sock")},
+		},
+	}
+	manager := Manager{Config: config.Config{State: config.State{TemplatesDir: filepath.Join(root, "templates")}}}
+	if err := manager.createSkeleton(service); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"conf.json", "plug.json"} {
+		if _, err := os.Stat(filepath.Join(service.Dataset.Mountpoint, "site", name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s placeholder was created", name)
+		}
+	}
+}
+
 func TestRemoveSocketDirs(t *testing.T) {
 	root := t.TempDir()
 	socket := filepath.Join(root, "{service_id}-{slot}", "http.sock")
