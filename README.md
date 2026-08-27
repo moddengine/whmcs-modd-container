@@ -143,9 +143,7 @@ password.
 | `zfs.mount_prefix` | Absolute mount root; a service becomes `<root>/whmcs-123`. |
 | `state.services_dir` | Live per-service TOML records. |
 | `state.tombstones_dir` | Records retained after permanent deletion. |
-| `state.templates_dir` | Optional `conf.json` and `plug.json` templates. |
 
-If a template file is absent, the controller leaves that service file absent.
 Back up the services and tombstones directories; site content follows the ZFS
 pool's snapshot and replication policy.
 

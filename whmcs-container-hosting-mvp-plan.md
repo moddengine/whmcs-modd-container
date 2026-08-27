@@ -659,7 +659,6 @@ mount_prefix = "/modd/sites"
 [state]
 services_dir = "/var/lib/modd-hosting/services"
 tombstones_dir = "/var/lib/modd-hosting/tombstones"
-templates_dir = "/etc/modd-hosting/templates"
 
 [caddy]
 service_config_dir = "/var/lib/modd-hosting/caddy/services"
@@ -821,9 +820,7 @@ Example service mountpoint:
 ```text
 /modd/sites/whmcs-123/
 ├── site/
-│   ├── data/
-│   ├── conf.json
-│   └── plug.json
+│   └── data/
 ├── backup/
 ├── shared/
 │   └── secrets/
@@ -1569,13 +1566,11 @@ Acceptance gate:
 - [ ] Implement used-byte query.
 - [ ] Implement recursive destroy with prefix guards.
 - [ ] Create folder skeleton.
-- [ ] Render `conf.json`, `plug.json`, or other required files from templates.
 - [ ] Preserve partial results on failure.
 
 Acceptance gate:
 
 - Test service provision creates the expected dataset and exact folder structure.
-- Failed template rendering leaves the dataset available for debugging.
 
 ## Phase 7: Caddy adapter
 

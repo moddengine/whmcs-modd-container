@@ -43,7 +43,6 @@ type ZFS struct {
 type State struct {
 	ServicesDir   string `toml:"services_dir"`
 	TombstonesDir string `toml:"tombstones_dir"`
-	TemplatesDir  string `toml:"templates_dir"`
 }
 type Caddy struct {
 	ServiceConfigDir string   `toml:"service_config_dir"`
