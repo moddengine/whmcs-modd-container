@@ -194,6 +194,7 @@ paths:
   /v1/services/{id}/upgrade:
     post:
       summary: Deploy an image version using blue-green switching
+      description: A new request may replace an upgrade that is still waiting for health checks; later phases remain protected from concurrent lifecycle changes.
       operationId: upgradeService
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]
       requestBody:

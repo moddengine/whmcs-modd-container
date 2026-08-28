@@ -342,7 +342,8 @@ function moddhosting_services_page(array $vars): void
 					'version' => $version,
 					'confirm_downgrade' => isset($_POST['confirm_downgrade']),
 				]);
-				echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-success">Success</td></tr>';
+				moddhosting_store_image_version($id, $version);
+				echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-success">Upgrade accepted</td></tr>';
 			} catch (\Throwable $error) {
 				echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-danger">' . moddhosting_h($error->getMessage()) . '</td></tr>';
 			}
@@ -414,11 +415,13 @@ function moddhosting_service_page(array $vars): void
             echo '<div class="alert alert-success">Service data permanently purged.</div>';
             return;
         } elseif ($action === 'upgrade') {
+            $version = trim((string) ($_POST['version'] ?? ''));
             $client->request('POST', '/v1/services/' . rawurlencode($id) . '/upgrade', [
-                'version' => trim((string) ($_POST['version'] ?? '')),
+                'version' => $version,
                 'confirm_downgrade' => isset($_POST['confirm_downgrade']),
             ]);
-            echo '<div class="alert alert-success">Deployment changed successfully.</div>';
+            moddhosting_store_image_version($id, $version);
+            echo '<div class="alert alert-success">Upgrade accepted.</div>';
         } else {
             throw new \RuntimeException('Confirmation text did not match.');
         }
@@ -511,6 +514,14 @@ function moddhosting_valid_id(string $id): string
         throw new \InvalidArgumentException('Invalid service ID.');
     }
     return $id;
+}
+
+function moddhosting_store_image_version(string $id, string $version): void
+{
+    Capsule::table('mod_moddhosting_services')->updateOrInsert(
+        ['service_id' => (int) substr(moddhosting_valid_id($id), 6)],
+        ['image_version' => $version],
+    );
 }
 
 function moddhosting_nav(string $moduleLink): string

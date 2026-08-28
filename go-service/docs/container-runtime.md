@@ -208,6 +208,9 @@ For an upgrade from blue to green:
    clear the operation/target fields.
 
 The next upgrade repeats the process in the opposite direction.
+While the target is still `waiting_for_health`, another upgrade request may
+replace it. The target slot is recreated with the new version and any eventual
+health result from the superseded attempt is ignored.
 
 Failure before the Caddy switch leaves the old deployment serving traffic.
 Caddy validation/reload failure restores the prior file. Failure after the

@@ -58,9 +58,10 @@ type Manager struct {
 	Notify  notify.Notifier
 	Logger  *slog.Logger
 	// ponytail: serialize lifecycle writes; switch to per-service locks only if parallel upgrades are needed.
-	mu            sync.Mutex
-	dnsBackoffs   []time.Duration
-	dnsHTTPClient *http.Client
+	mu             sync.Mutex
+	healthAttempts map[string]uint64
+	dnsBackoffs    []time.Duration
+	dnsHTTPClient  *http.Client
 }
 
 func ValidateServiceID(id string) error {
@@ -241,8 +242,9 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 		m.mu.Unlock()
 		return fail(err)
 	}
+	attempt := m.nextHealthAttempt(service.ID)
 	m.mu.Unlock()
-	go m.finishHealth(id, "provision", requestID)
+	go m.finishHealth(service, "provision", requestID, attempt)
 	status, err := m.status(ctx, service)
 	return status, true, err
 }
@@ -393,6 +395,7 @@ func (m *Manager) Resume(ctx context.Context, id, requestID string) (*model.Stat
 		m.mu.Unlock()
 		return nil, false, internal(err)
 	}
+	attempt := m.nextHealthAttempt(service.ID)
 	m.mu.Unlock()
 	if err := m.ensureIsolation(ctx, service); err != nil {
 		m.failSync(service, requestID, err)
@@ -411,7 +414,7 @@ func (m *Manager) Resume(ctx context.Context, id, requestID string) (*model.Stat
 		m.failSync(service, requestID, err)
 		return nil, false, internal(err)
 	}
-	go m.finishHealth(id, "resume", requestID)
+	go m.finishHealth(service, "resume", requestID, attempt)
 	status, err := m.status(ctx, service)
 	return status, true, err
 }
@@ -619,6 +622,14 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		status, err := m.status(ctx, service)
 		return status, false, err
 	}
+	if service.Phase == "waiting_for_health" && service.Operation == "upgrade" {
+		if targetMainDomain == "" {
+			targetMainDomain, targetStagingDomain = service.TargetMainDomain, service.TargetStagingDomain
+		}
+		if targetPublicIPv4 == "" {
+			targetPublicIPv4 = service.TargetPublicIPv4
+		}
+	}
 	target := opposite(service.LiveDeploy)
 	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.UpdatedAt = "starting", "upgrade", target, req.Version, time.Now().UTC()
 	service.TargetMainDomain, service.TargetStagingDomain = targetMainDomain, targetStagingDomain
@@ -628,6 +639,7 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		m.mu.Unlock()
 		return nil, false, internal(err)
 	}
+	attempt := m.nextHealthAttempt(service.ID)
 	m.mu.Unlock()
 	if err := m.ensureIsolation(ctx, service); err != nil {
 		m.failSync(service, requestID, err)
@@ -667,7 +679,7 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		m.failSync(service, requestID, err)
 		return nil, false, internal(err)
 	}
-	go m.finishHealth(id, "upgrade", requestID)
+	go m.finishHealth(service, "upgrade", requestID, attempt)
 	status, err := m.status(ctx, service)
 	return status, true, err
 }
@@ -679,7 +691,7 @@ func validateUpgrade(service model.Service, req model.UpgradeRequest, forceRedep
 	if service.Phase == "failed" && service.Operation != "upgrade" {
 		return false, conflict(errors.New("retry the failed lifecycle operation before upgrading"))
 	}
-	if busy(service.Phase) {
+	if busy(service.Phase) && !(service.Phase == "waiting_for_health" && service.Operation == "upgrade") {
 		return false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
 	}
 	if req.Version == service.Version && !forceRedeploy {
@@ -692,21 +704,41 @@ func validateUpgrade(service model.Service, req model.UpgradeRequest, forceRedep
 	return false, nil
 }
 
-func (m *Manager) finishHealth(id, operation, requestID string) {
-	service, ok := m.deferredService(id, operation)
-	if !ok {
+func (m *Manager) finishHealth(service model.Service, operation, requestID string, attempt uint64) {
+	target := service.TargetDeploy
+	healthErr := m.Health.Check(context.Background(), service.Deploy[target].Socket)
+	m.mu.Lock()
+	service, err := m.Repo.Get(service.ID)
+	if err != nil || m.healthAttempts[service.ID] != attempt || service.Operation != operation || service.Phase != "waiting_for_health" {
+		m.mu.Unlock()
 		return
 	}
-	target := service.TargetDeploy
-	if err := m.Health.Check(context.Background(), service.Deploy[target].Socket); err != nil {
+	target = service.TargetDeploy
+	if healthErr != nil {
 		service.Deploy[target] = withHealth(service.Deploy[target], "unhealthy")
-		m.failDeferred(service, requestID, err)
+		service.Phase, service.LastError, service.UpdatedAt = "failed", healthErr.Error(), time.Now().UTC()
+		err = m.Repo.Put(service)
+		m.mu.Unlock()
+		if err != nil {
+			if m.Logger != nil {
+				m.Logger.Error("persist deferred state", "service_id", service.ID, "error", err)
+			}
+			return
+		}
+		m.notifyAsync(service.Operation, false, service, requestID, healthErr.Error())
 		return
 	}
 	service.Deploy[target] = withHealth(service.Deploy[target], "healthy")
 	service.Phase, service.UpdatedAt = "routing", time.Now().UTC()
-	m.putDeferred(service)
-	if err := m.Caddy.Active(context.Background(), id, routingDomains(service, operation), target); err != nil {
+	err = m.Repo.Put(service)
+	m.mu.Unlock()
+	if err != nil {
+		if m.Logger != nil {
+			m.Logger.Error("persist deferred state", "service_id", service.ID, "error", err)
+		}
+		return
+	}
+	if err := m.Caddy.Active(context.Background(), service.ID, routingDomains(service, operation), target); err != nil {
 		m.failDeferred(service, requestID, err)
 		return
 	}
@@ -721,7 +753,7 @@ func (m *Manager) finishHealth(id, operation, requestID string) {
 		service.Phase, service.UpdatedAt = "draining", time.Now().UTC()
 		m.putDeferred(service)
 		if err := cleanupOldDeploy(context.Background(), m.Config.Deployment.TrafficDrain, func(ctx context.Context) error {
-			return m.Docker.RemoveSlot(ctx, id, service.LiveDeploy)
+			return m.Docker.RemoveSlot(ctx, service.ID, service.LiveDeploy)
 		}); err != nil {
 			m.failDeferred(service, requestID, err)
 			return
@@ -734,7 +766,7 @@ func (m *Manager) finishHealth(id, operation, requestID string) {
 	}
 	m.putDeferred(service)
 	if m.dnsEnabled() {
-		go m.syncDNS(id, service.MainDomain, service.PublicIPv4)
+		go m.syncDNS(service.ID, service.MainDomain, service.PublicIPv4)
 	}
 	m.notifyAsync(operation, true, service, requestID, "")
 }
@@ -783,6 +815,15 @@ func (m *Manager) deferredService(id, operation string) (model.Service, bool) {
 	defer m.mu.Unlock()
 	service, err := m.Repo.Get(id)
 	return service, err == nil && service.Operation == operation && busy(service.Phase)
+}
+
+// nextHealthAttempt must be called while m.mu is held.
+func (m *Manager) nextHealthAttempt(id string) uint64 {
+	if m.healthAttempts == nil {
+		m.healthAttempts = map[string]uint64{}
+	}
+	m.healthAttempts[id]++
+	return m.healthAttempts[id]
 }
 
 func (m *Manager) putDeferred(service model.Service) {

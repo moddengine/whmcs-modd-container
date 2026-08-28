@@ -218,6 +218,14 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 	if done, err := validateUpgrade(service, model.UpgradeRequest{Version: "v2"}, true); err != nil || done {
 		t.Fatalf("forced same-version deploy was treated as complete: done=%t err=%v", done, err)
 	}
+	service.Phase, service.Operation, service.Version, service.TargetVersion = "waiting_for_health", "upgrade", "v1", "v2"
+	if done, err := validateUpgrade(service, model.UpgradeRequest{Version: "v3"}, false); err != nil || done {
+		t.Fatalf("in-progress unhealthy upgrade could not be superseded: done=%t err=%v", done, err)
+	}
+	service.Phase = "routing"
+	if _, err := validateUpgrade(service, model.UpgradeRequest{Version: "v3"}, false); err == nil {
+		t.Fatal("upgrade was superseded after routing started")
+	}
 }
 
 func TestProvisionRejectsInvalidPublicIPv4(t *testing.T) {
@@ -453,13 +461,14 @@ func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
 	}
 	manager := Manager{
 		Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, dnsBackoffs: []time.Duration{0},
-		Caddy:  caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
-		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		Caddy:          caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+		Config:         config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		healthAttempts: map[string]uint64{service.ID: 1},
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
 		})},
 	}
-	manager.finishHealth(service.ID, "provision", "request-1")
+	manager.finishHealth(service, "provision", "request-1", 1)
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 		got, _ := repo.Get(service.ID)
 		if got.DNSStatus == "in_sync" {
@@ -470,6 +479,35 @@ func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
 		}
 	}
 	t.Fatal("initial asynchronous DNS result was not recorded")
+}
+
+func TestSupersededHealthResultIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "health.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })}
+	go server.Serve(listener)
+	t.Cleanup(func() { _ = server.Close() })
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{
+		ID: "whmcs-123", State: model.Active, Phase: "waiting_for_health", Operation: "upgrade", LiveDeploy: "blue", TargetDeploy: "green", Version: "v1", TargetVersion: "v3",
+		Deploy: map[string]model.Deploy{"green": {Socket: socket, Version: "v3", Health: "checking"}},
+	}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, healthAttempts: map[string]uint64{service.ID: 2}}
+	manager.finishHealth(service, "upgrade", "old-request", 1)
+	got, err := repo.Get(service.ID)
+	if err != nil || got.Phase != "waiting_for_health" || got.TargetVersion != "v3" || got.Deploy["green"].Health != "checking" {
+		t.Fatalf("replacement was overwritten by stale health result: %#v, %v", got, err)
+	}
 }
 
 func TestServiceID(t *testing.T) {
