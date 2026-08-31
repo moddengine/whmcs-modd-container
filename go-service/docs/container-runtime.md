@@ -17,6 +17,7 @@ Each service has these durable and observed resources:
 | `<state.services_dir>/<id>.toml` | Desired lifecycle state, current/target deployment, paths, and the last error. Writes are atomic and retain a `.bak` of the previous live record. |
 | `<zfs.dataset_prefix>/<id>` | Persistent site data, backups, secrets, and slot-local data. |
 | `<zfs.mount_prefix>/<id>` | Dataset mountpoint and Docker bind source. |
+| `<zfs.mount_prefix>/<id>/secrets` | Atomic 32-hour identity certificate, private key, and configured root certificate; mounted read-only at `<certificates.mount_path>`. |
 | Host user/group `<id>` | Owns writable storage and socket directories. |
 | `WHMCS-<id>-blue` / `-green` | Alternating Docker deployment slots. |
 | `<deployment.socket>` | Slot-specific `http.sock` used by health checks and Caddy. |
@@ -97,7 +98,7 @@ group values as `<slug>|<display name>`.
    ```text
    site/data
    backup
-   shared/secrets
+   secrets/{ident.crt,ident.key,root.crt}
    blue/{cache,run,debug}
    green/{cache,run,debug}
    ```
@@ -105,6 +106,10 @@ group values as `<slug>|<display name>`.
 6. It creates or verifies the host user/group, recursively assigns the dataset
    and socket directories to that identity, and refuses conflicting UID/GID
    assignments.
+   The controller issues a new identity key and 32-hour certificate, bundles
+   the leaf and intermediate certificates in `ident.crt`, then
+   re-signs active identities with the same key every eight hours. Resume
+   rotates the key and refreshes the configured root certificate copy.
 7. It starts the blue slot. If a blue container already exists, it is reused
    when running or started when stopped; otherwise the controller creates it.
 8. It persists phase `waiting_for_health` and health `checking`, starts the

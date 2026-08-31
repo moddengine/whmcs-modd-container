@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/moddengine/whmcs-container-controller/internal/caddy"
+	"github.com/moddengine/whmcs-container-controller/internal/certificate"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	dockeradapter "github.com/moddengine/whmcs-container-controller/internal/docker"
 	"github.com/moddengine/whmcs-container-controller/internal/healthcheck"
@@ -55,24 +56,26 @@ func (e *Error) Error() string { return e.Err.Error() }
 func (e *Error) Unwrap() error { return e.Err }
 
 type Manager struct {
-	Config  config.Config
-	Context context.Context
-	Repo    *state.Repository
-	Docker  *dockeradapter.Adapter
-	ZFS     zfs.Adapter
-	Caddy   caddy.Adapter
-	Health  healthcheck.Checker
-	Metrics metrics.Provider
-	Notify  notify.Notifier
-	Logger  *slog.Logger
+	Config       config.Config
+	Context      context.Context
+	Repo         *state.Repository
+	Docker       *dockeradapter.Adapter
+	ZFS          zfs.Adapter
+	Caddy        caddy.Adapter
+	Health       healthcheck.Checker
+	Metrics      metrics.Provider
+	Notify       notify.Notifier
+	Logger       *slog.Logger
+	Certificates *certificate.Issuer
 	// ponytail: serialize lifecycle writes; switch to per-service locks only if parallel upgrades are needed.
-	mu             sync.Mutex
-	healthAttempts map[string]uint64
-	dnsBackoffs    []time.Duration
-	dnsHTTPClient  *http.Client
-	dnsWake        chan struct{}
-	dnsPending     map[string]dnsUpdate
-	dnsActive      dnsUpdate
+	mu                       sync.Mutex
+	healthAttempts           map[string]uint64
+	dnsBackoffs              []time.Duration
+	dnsHTTPClient            *http.Client
+	dnsWake                  chan struct{}
+	dnsPending               map[string]dnsUpdate
+	dnsActive                dnsUpdate
+	certificateWorkerStarted bool
 }
 
 type dnsUpdate struct {
@@ -262,6 +265,9 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	if err := m.createSkeleton(service); err != nil {
 		return fail(err)
 	}
+	if err := m.issueIdentity(service, true); err != nil {
+		return fail(err)
+	}
 	if err := m.ensureIsolation(ctx, service); err != nil {
 		return fail(err)
 	}
@@ -449,6 +455,10 @@ func (m *Manager) Resume(ctx context.Context, id string, req model.ResumeRequest
 	if err := m.ensureIsolation(ctx, service); err != nil {
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("isolation_failed", err)
+	}
+	if err := m.issueIdentity(service, true); err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("certificate_issue_failed", err)
 	}
 	updated := service
 	updated.Package = packageValues
@@ -1429,7 +1439,7 @@ func (m *Manager) liveService(id string) (model.Service, error) {
 
 func (m *Manager) createSkeleton(service model.Service) error {
 	dirs := []string{
-		"site/data", "backup", "shared/secrets",
+		"site/data", "backup", "secrets",
 		"blue/cache", "blue/run", "blue/debug", "green/cache", "green/run", "green/debug",
 	}
 	for _, dir := range dirs {
@@ -1443,6 +1453,66 @@ func (m *Manager) createSkeleton(service model.Service) error {
 		}
 	}
 	return nil
+}
+
+func (m *Manager) issueIdentity(service model.Service, newKey bool) error {
+	if m.Certificates == nil {
+		return errors.New("certificate issuer is not configured")
+	}
+	identity, err := isolation.ForService(service.ID)
+	if err != nil {
+		return err
+	}
+	return m.Certificates.Issue(filepath.Join(service.Dataset.Mountpoint, "secrets"), service.ID, newKey, identity.UID, identity.GID)
+}
+
+func (m *Manager) StartCertificateWorker() {
+	if m.Certificates == nil {
+		return
+	}
+	m.mu.Lock()
+	if m.certificateWorkerStarted {
+		m.mu.Unlock()
+		return
+	}
+	m.certificateWorkerStarted = true
+	m.mu.Unlock()
+	go m.runCertificateWorker()
+}
+
+func (m *Manager) runCertificateWorker() {
+	ticker := time.NewTicker(8 * time.Hour)
+	defer ticker.Stop()
+	for {
+		m.renewCertificates()
+		select {
+		case <-m.backgroundContext().Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) renewCertificates() {
+	services, err := m.Repo.List()
+	if err != nil {
+		if m.Logger != nil {
+			m.Logger.Error("list services for certificate renewal", "error", err)
+		}
+		return
+	}
+	for _, service := range services {
+		if service.State != model.Active {
+			continue
+		}
+		err := m.issueIdentity(service, false)
+		if errors.Is(err, os.ErrNotExist) {
+			err = m.issueIdentity(service, true)
+		}
+		if err != nil && m.Logger != nil {
+			m.Logger.Error("renew identity certificate", "service_id", service.ID, "error", err)
+		}
+	}
 }
 
 func (m *Manager) ensureIsolation(ctx context.Context, service model.Service) error {

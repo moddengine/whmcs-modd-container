@@ -15,6 +15,7 @@ import (
 
 	"github.com/moddengine/whmcs-container-controller/internal/api"
 	"github.com/moddengine/whmcs-container-controller/internal/caddy"
+	"github.com/moddengine/whmcs-container-controller/internal/certificate"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	dockeradapter "github.com/moddengine/whmcs-container-controller/internal/docker"
 	"github.com/moddengine/whmcs-container-controller/internal/healthcheck"
@@ -46,6 +47,10 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	if cfg.DNSWebhook.URL == "" {
 		logger.Info("DNS update disabled; dns_webhook.url is empty")
+	}
+	issuer, err := certificate.Load(cfg.Certificates)
+	if err != nil {
+		fatal(fmt.Errorf("load certificate issuer: %w", err))
 	}
 
 	repo := state.New(cfg.State.ServicesDir, cfg.State.TombstonesDir)
@@ -95,7 +100,7 @@ func main() {
 			Path: cfg.Deployment.HealthPath, Attempts: cfg.Deployment.HealthAttempts,
 			InitialDelay: cfg.Deployment.HealthInitialDelay, Backoff: cfg.Deployment.HealthBackoff,
 		},
-		Metrics: metrics.Mock{}, Notify: notifier, Logger: logger,
+		Metrics: metrics.Mock{}, Notify: notifier, Logger: logger, Certificates: issuer,
 	}
 	controllerContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -104,6 +109,7 @@ func main() {
 	if err := manager.RecoverInterrupted(); err != nil {
 		fatal(fmt.Errorf("recover interrupted operations: %w", err))
 	}
+	manager.StartCertificateWorker()
 	handler := (&api.API{
 		Manager: manager, Config: cfg, Context: controllerContext, Token: token, Logger: logger,
 		Version: version, Commit: commit, BuildDate: buildDate, DockerAPI: dockerAPI,

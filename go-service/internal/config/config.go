@@ -14,16 +14,17 @@ import (
 )
 
 type Config struct {
-	Server     Server     `toml:"server"`
-	Auth       Auth       `toml:"auth"`
-	ZFS        ZFS        `toml:"zfs"`
-	State      State      `toml:"state"`
-	Caddy      Caddy      `toml:"caddy"`
-	Docker     Docker     `toml:"docker"`
-	Deployment Deployment `toml:"deployment"`
-	Domains    Domains    `toml:"domains"`
-	DNSWebhook DNSWebhook `toml:"dns_webhook"`
-	GoogleChat GoogleChat `toml:"google_chat"`
+	Server       Server       `toml:"server"`
+	Auth         Auth         `toml:"auth"`
+	ZFS          ZFS          `toml:"zfs"`
+	State        State        `toml:"state"`
+	Caddy        Caddy        `toml:"caddy"`
+	Docker       Docker       `toml:"docker"`
+	Certificates Certificates `toml:"certificates"`
+	Deployment   Deployment   `toml:"deployment"`
+	Domains      Domains      `toml:"domains"`
+	DNSWebhook   DNSWebhook   `toml:"dns_webhook"`
+	GoogleChat   GoogleChat   `toml:"google_chat"`
 }
 
 type Server struct {
@@ -52,12 +53,19 @@ type Caddy struct {
 	ReloadCommand    []string `toml:"reload_command"`
 }
 type Docker struct {
-	Network         string        `toml:"network"`
-	ImageRepository string        `toml:"image_repository"`
-	Binds           []string      `toml:"binds"`
-	Environment     []string      `toml:"environment"`
-	PullTimeout     time.Duration `toml:"-"`
-	PullTimeoutRaw  string        `toml:"pull_timeout"`
+	Network              string        `toml:"network"`
+	ImageRepository      string        `toml:"image_repository"`
+	Binds                []string      `toml:"binds"`
+	Environment          []string      `toml:"environment"`
+	PullTimeout          time.Duration `toml:"-"`
+	PullTimeoutRaw       string        `toml:"pull_timeout"`
+	CertificateMountPath string        `toml:"-"`
+}
+type Certificates struct {
+	RootCertificate         string `toml:"root_certificate"`
+	IntermediateCertificate string `toml:"intermediate_certificate"`
+	IntermediateKey         string `toml:"intermediate_key"`
+	MountPath               string `toml:"mount_path"`
 }
 type Deployment struct {
 	HealthPath         string        `toml:"health_path"`
@@ -92,6 +100,7 @@ func Load(path string) (Config, error) {
 	if err = toml.Unmarshal(b, &c); err != nil {
 		return c, fmt.Errorf("parse config: %w", err)
 	}
+	c.Docker.CertificateMountPath = c.Certificates.MountPath
 	if c.Docker.PullTimeoutRaw == "" {
 		c.Docker.PullTimeout = 30 * time.Minute
 	}
@@ -138,11 +147,18 @@ func (c Config) Validate() error {
 	for name, path := range map[string]string{
 		"zfs.mount_prefix": c.ZFS.MountPrefix, "state.services_dir": c.State.ServicesDir,
 		"state.tombstones_dir": c.State.TombstonesDir, "caddy.service_config_dir": c.Caddy.ServiceConfigDir,
-		"deployment.socket": c.Deployment.Socket,
+		"deployment.socket":                     c.Deployment.Socket,
+		"certificates.root_certificate":         c.Certificates.RootCertificate,
+		"certificates.intermediate_certificate": c.Certificates.IntermediateCertificate,
+		"certificates.intermediate_key":         c.Certificates.IntermediateKey,
+		"certificates.mount_path":               c.Certificates.MountPath,
 	} {
 		if !filepath.IsAbs(path) {
 			return fmt.Errorf("%s must be absolute", name)
 		}
+	}
+	if strings.Contains(c.Certificates.MountPath, ":") {
+		return errors.New("certificates.mount_path must not contain a colon")
 	}
 	unknown := strings.NewReplacer("{service_id}", "", "{slot}", "").Replace(c.Deployment.Socket)
 	if strings.ContainsAny(unknown, "{}") {

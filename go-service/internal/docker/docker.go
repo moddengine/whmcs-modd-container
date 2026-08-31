@@ -123,10 +123,11 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 	for _, code := range packageCodes {
 		env = append(env, "ME_PACKAGE_"+strings.ToUpper(code)+"="+service.Package[code])
 	}
-	binds := make([]string, 0, len(cfg.Binds)+2)
+	binds := make([]string, 0, len(cfg.Binds)+3)
 	for _, bind := range cfg.Binds {
 		binds = append(binds, replacer.Replace(bind))
 	}
+	binds = append(binds, filepath.Join(service.Dataset.Mountpoint, "secrets")+":"+cfg.CertificateMountPath+":ro")
 	socketDir := filepath.Dir(service.Deploy[slot].Socket)
 	binds = append(binds, socketDir+":"+socketDir)
 	return &container.Config{

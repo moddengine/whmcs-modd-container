@@ -211,8 +211,9 @@ func TestContainerSpec(t *testing.T) {
 	}
 	cfg := config.Docker{
 		Network: "udo-net", ImageRepository: "whmcs-runtime",
-		Binds:       []string{"{mountpoint}/{slot}/cache:/cache"},
-		Environment: []string{"SERVICE={service_id}", "DATA={mountpoint}", "DEPLOY={slot}"},
+		Binds:                []string{"{mountpoint}/{slot}/cache:/cache"},
+		Environment:          []string{"SERVICE={service_id}", "DATA={mountpoint}", "DEPLOY={slot}"},
+		CertificateMountPath: "/srv/modd/secrets",
 	}
 	spec, host, networking, err := ContainerSpec(cfg, service, "blue")
 	if err != nil {
@@ -242,6 +243,7 @@ func TestContainerSpec(t *testing.T) {
 	}
 	if !slices.Equal(host.Binds, []string{
 		"/modd/sites/whmcs-123/blue/cache:/cache",
+		"/modd/sites/whmcs-123/secrets:/srv/modd/secrets:ro",
 		"/run/whmcs/whmcs-123-blue:/run/whmcs/whmcs-123-blue",
 	}) {
 		t.Fatalf("unexpected binds: %#v", host.Binds)

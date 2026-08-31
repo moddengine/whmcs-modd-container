@@ -15,7 +15,8 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if config.Server.Listen != "127.0.0.1:8443" ||
 		config.Deployment.TrafficDrain != 10*time.Second ||
-		config.Deployment.HealthAttempts != 30 || config.DNSWebhook.Timeout != 30*time.Second || config.Docker.PullTimeout != 30*time.Minute {
+		config.Deployment.HealthAttempts != 30 || config.DNSWebhook.Timeout != 30*time.Second || config.Docker.PullTimeout != 30*time.Minute ||
+		config.Docker.CertificateMountPath != "/srv/modd/secrets" {
 		t.Fatalf("unexpected example config: %#v", config)
 	}
 }
