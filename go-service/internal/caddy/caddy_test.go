@@ -39,3 +39,13 @@ func TestRenderAndStatus(t *testing.T) {
 		t.Fatalf("Active() did not replace stale config: %q, %v", gotSocket, err)
 	}
 }
+
+func TestLimitedBufferCapsOutput(t *testing.T) {
+	buffer := limitedBuffer{limit: 4}
+	if n, err := buffer.Write([]byte("abcdefgh")); err != nil || n != 8 {
+		t.Fatalf("Write() = %d, %v", n, err)
+	}
+	if got := buffer.String(); got != "abcd" || !buffer.truncated {
+		t.Fatalf("limited output = %q, truncated=%t", got, buffer.truncated)
+	}
+}

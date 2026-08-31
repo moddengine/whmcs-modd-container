@@ -20,7 +20,7 @@ Each service has these durable and observed resources:
 | Host user/group `<id>` | Owns writable storage and socket directories. |
 | `WHMCS-<id>-blue` / `-green` | Alternating Docker deployment slots. |
 | `<deployment.socket>` | Slot-specific `http.sock` used by health checks and Caddy. |
-| `<caddy.service_config_dir>/<id>.caddy` | Routing for the main and staging domains. |
+| `<caddy.service_config_dir>/<id>.caddy` | Routing for the main and optional staging domains. |
 | `<state.tombstones_dir>/<id>.toml` | Permanent record left after deletion. It prevents accidental reuse of the ID. |
 
 The TOML record is the controller's lifecycle journal, but status is not taken
@@ -83,9 +83,8 @@ snake case and become uppercase environment suffixes. For example,
 `email_sends=500` becomes `ME_PACKAGE_EMAIL_SENDS=500`; WHMCS sends plan and
 group values as `<slug>|<display name>`.
 
-1. The controller validates the ID, normalizes domains to lowercase, and
-   derives a staging domain when one was omitted. With the example suffix,
-   `example.com` becomes `example-com.staging.com`.
+1. The controller validates the ID and normalizes supplied domains to
+   lowercase. An omitted staging domain remains disabled.
 2. It rejects an existing tombstone and confirms the exact image tag exists
    locally. An existing live record is accepted only when its domains and
    version exactly match the request.
@@ -110,9 +109,10 @@ group values as `<slug>|<display name>`.
    when running or started when stopped; otherwise the controller creates it.
 8. It persists phase `waiting_for_health` and health `checking`, starts the
    deferred health/routing work, and returns `202`.
-9. After health succeeds, the controller writes the active Caddyfile for both
-   domains, validates and reloads Caddy, then commits phase `running`, clears
-   the target fields and last error, and sends a best-effort notification.
+9. After health succeeds, the controller writes the active Caddyfile for the
+   main domain and the staging domain when supplied, validates and reloads
+   Caddy, then commits phase `running`, clears the target fields and last
+   error, and sends a best-effort notification.
 
 If a synchronous step fails, the endpoint returns `422`, phase becomes
 `failed`, and `last_error` contains the cause. If deferred health or Caddy work
@@ -161,8 +161,9 @@ import /etc/caddy/services/*.caddy
 Caddy must see the service directory, Unix socket tree, and suspension root at
 the same paths referenced by the controller configuration.
 
-For active routing, `caddy.active_template` is expanded once per main/staging
-domain. The standard template proxies to the selected slot:
+For active routing, `caddy.active_template` is expanded for the main domain
+and, when configured, the staging domain. The standard template proxies to the
+selected slot:
 
 ```caddyfile
 example.com {
@@ -170,8 +171,8 @@ example.com {
 }
 ```
 
-For suspension, one site block covers both domains and serves the shared
-`index.html`. Termination and deletion remove the per-service file.
+For suspension, one site block covers the configured domains and serves the
+shared `index.html`. Termination and deletion remove the per-service file.
 
 Updates are transactional as far as the filesystem and Caddy allow:
 
@@ -279,23 +280,24 @@ terminated service with its existing data.
 
 1. Persist phase `deleting` and operation `delete` in the live record.
 2. Remove any remaining managed containers.
-3. Remove both slot sockets and service-specific socket directories.
-4. Recursively destroy the exact expected ZFS dataset. The ZFS adapter refuses
+3. Immediately remove the service Caddyfile, validate Caddy, and reload it.
+4. Remove both slot sockets and service-specific socket directories.
+5. Remove the host user and group, refusing identities whose UID/GID no longer
+   matches the deterministic mapping.
+6. Recursively destroy the exact expected ZFS dataset. The ZFS adapter refuses
    a dataset name outside the configured service prefix or one that differs
    from the recorded service ID.
-5. Remove the now-empty mountpoint.
-6. Remove the host user and group, refusing identities whose UID/GID no longer
-   matches the deterministic mapping.
-7. Write a tombstone containing the domains, last version, former dataset, and
+7. Remove the now-empty mountpoint.
+8. Write a tombstone containing the domains, last version, former dataset, and
    deletion time; then remove the live TOML record.
-8. In deferred work, remove any Caddy service file. On success, set the
-   tombstone phase to `deleted` and return the final notification.
+9. In deferred work, verify the Caddy service file remains absent, set the
+   tombstone phase to `deleted`, and return the final notification.
 
 The endpoint returns `202` after the destructive resource cleanup and
-tombstone transition; Caddy cleanup may still be running. A failed final Caddy
-cleanup leaves a `failed` tombstone and can be retried with the same `DELETE`.
-A completed tombstone makes repeated deletion return `200` and continues to
-block reprovisioning under that ID.
+tombstone transition; finalization may still be running. A failed final Caddy
+verification leaves a `failed` tombstone and can be retried with the same
+`DELETE`. A completed tombstone makes repeated deletion return `200` and
+continues to block reprovisioning under that ID.
 
 ## Failure and restart behavior
 

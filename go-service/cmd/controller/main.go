@@ -97,11 +97,15 @@ func main() {
 		},
 		Metrics: metrics.Mock{}, Notify: notifier, Logger: logger,
 	}
+	controllerContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	manager.Context = controllerContext
+	manager.StartDNSWorker()
 	if err := manager.RecoverInterrupted(); err != nil {
 		fatal(fmt.Errorf("recover interrupted operations: %w", err))
 	}
 	handler := (&api.API{
-		Manager: manager, Config: cfg, Token: token, Logger: logger,
+		Manager: manager, Config: cfg, Context: controllerContext, Token: token, Logger: logger,
 		Version: version, Commit: commit, BuildDate: buildDate, DockerAPI: dockerAPI,
 	}).Handler()
 	server := &http.Server{
@@ -121,9 +125,7 @@ func main() {
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	<-controllerContext.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {

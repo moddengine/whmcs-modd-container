@@ -32,7 +32,7 @@ type Service struct {
 	ID                  string            `toml:"id" json:"id"`
 	State               string            `toml:"state" json:"state"`
 	MainDomain          string            `toml:"main_domain" json:"main_domain"`
-	StagingDomain       string            `toml:"staging_domain" json:"staging_domain"`
+	StagingDomain       string            `toml:"staging_domain" json:"staging_domain,omitempty"`
 	PublicIPv4          string            `toml:"public_ipv4" json:"public_ipv4"`
 	DisplayName         string            `toml:"display_name,omitempty" json:"display_name,omitempty"`
 	Version             string            `toml:"version" json:"version"`
@@ -77,7 +77,7 @@ type Tombstone struct {
 	ID            string    `toml:"id" json:"id"`
 	State         string    `toml:"state" json:"state"`
 	MainDomain    string    `toml:"main_domain" json:"main_domain"`
-	StagingDomain string    `toml:"staging_domain" json:"staging_domain"`
+	StagingDomain string    `toml:"staging_domain" json:"staging_domain,omitempty"`
 	LastVersion   string    `toml:"last_version" json:"last_version"`
 	DeletedAt     time.Time `toml:"deleted_at" json:"deleted_at"`
 	FormerDataset string    `toml:"former_dataset" json:"former_dataset"`

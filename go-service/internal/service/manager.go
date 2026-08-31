@@ -56,6 +56,7 @@ func (e *Error) Unwrap() error { return e.Err }
 
 type Manager struct {
 	Config  config.Config
+	Context context.Context
 	Repo    *state.Repository
 	Docker  *dockeradapter.Adapter
 	ZFS     zfs.Adapter
@@ -69,6 +70,13 @@ type Manager struct {
 	healthAttempts map[string]uint64
 	dnsBackoffs    []time.Duration
 	dnsHTTPClient  *http.Client
+	dnsWake        chan struct{}
+	dnsPending     map[string]dnsUpdate
+	dnsActive      dnsUpdate
+}
+
+type dnsUpdate struct {
+	id, domain, publicIPv4 string
 }
 
 func ValidateServiceID(id string) error {
@@ -93,14 +101,6 @@ func NormalizeDomain(domain string) (string, error) {
 		}
 	}
 	return domain, nil
-}
-
-func DeriveStaging(domain, suffix string) (string, error) {
-	suffix, err := NormalizeDomain(suffix)
-	if err != nil {
-		return "", fmt.Errorf("invalid staging suffix: %w", err)
-	}
-	return NormalizeDomain(strings.ReplaceAll(domain, ".", "-") + "." + suffix)
 }
 
 func NormalizePublicIPv4(value string) (string, error) {
@@ -142,11 +142,9 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	if err != nil {
 		return nil, false, badRequest(err)
 	}
-	stagingDomain := req.StagingDomain
-	if stagingDomain == "" {
-		stagingDomain, err = DeriveStaging(mainDomain, m.Config.Domains.StagingSuffix)
-	} else {
-		stagingDomain, err = NormalizeDomain(stagingDomain)
+	stagingDomain := ""
+	if strings.TrimSpace(req.StagingDomain) != "" {
+		stagingDomain, err = NormalizeDomain(req.StagingDomain)
 	}
 	if err != nil {
 		return nil, false, badRequest(err)
@@ -350,7 +348,13 @@ func (m *Manager) changeDomains(ctx context.Context, id, mainDomain, stagingDoma
 
 func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDomain string, requestedIPv4 ...string) (model.Service, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var queued *dnsUpdate
+	defer func() {
+		m.mu.Unlock()
+		if queued != nil {
+			m.enqueueDNS(queued.id, queued.domain, queued.publicIPv4)
+		}
+	}()
 	service, err := m.liveService(id)
 	if err != nil {
 		return service, err
@@ -389,7 +393,7 @@ func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDoma
 		return service, internal(fmt.Errorf("persist hostname change: %w", err))
 	}
 	if queueDNS {
-		go m.syncDNS(id, mainDomain, publicIPv4)
+		queued = &dnsUpdate{id: id, domain: mainDomain, publicIPv4: publicIPv4}
 	}
 	return service, nil
 }
@@ -583,17 +587,13 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) (*model.Tomb
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("delete_failed", err)
 	}
+	if err := m.Caddy.Remove(ctx, id); err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("caddy_cleanup_failed", err)
+	}
 	if err := m.removeSocketDirs(id); err != nil {
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("socket_cleanup_failed", err)
-	}
-	if err := m.ZFS.Destroy(ctx, id, service.Dataset.Name); err != nil {
-		m.failSync(service, requestID, err)
-		return nil, false, unprocessable("zfs_destroy_failed", err)
-	}
-	if err := os.Remove(service.Dataset.Mountpoint); err != nil && !errors.Is(err, os.ErrNotExist) {
-		m.failSync(service, requestID, err)
-		return nil, false, unprocessable("mountpoint_cleanup_failed", err)
 	}
 	identity, err := isolation.ForService(id)
 	if err != nil {
@@ -602,6 +602,14 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) (*model.Tomb
 	if err := isolation.RemoveAccount(ctx, identity); err != nil {
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("account_cleanup_failed", err)
+	}
+	if err := m.ZFS.Destroy(ctx, id, service.Dataset.Name); err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("zfs_destroy_failed", err)
+	}
+	if err := os.Remove(service.Dataset.Mountpoint); err != nil && !errors.Is(err, os.ErrNotExist) {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("mountpoint_cleanup_failed", err)
 	}
 	tombstone := model.Tombstone{
 		ID: id, State: model.Deleted, MainDomain: service.MainDomain, StagingDomain: service.StagingDomain,
@@ -766,10 +774,15 @@ func validateUpgrade(service model.Service, req model.UpgradeRequest, forceRedep
 
 func (m *Manager) finishHealth(service model.Service, operation, requestID string, attempt uint64) {
 	target := service.TargetDeploy
-	healthErr := m.Health.Check(context.Background(), service.Deploy[target].Socket)
+	healthErr := m.Health.Check(m.backgroundContext(), service.Deploy[target].Socket)
+	id := service.ID
 	m.mu.Lock()
-	service, err := m.Repo.Get(service.ID)
-	if err != nil || m.healthAttempts[service.ID] != attempt || service.Operation != operation || service.Phase != "waiting_for_health" {
+	service, err := m.Repo.Get(id)
+	current := m.healthAttempts[id] == attempt
+	if current {
+		delete(m.healthAttempts, id)
+	}
+	if err != nil || !current || service.Operation != operation || service.Phase != "waiting_for_health" {
 		m.mu.Unlock()
 		return
 	}
@@ -798,12 +811,14 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 		}
 		return
 	}
-	if err := m.Caddy.Active(context.Background(), service.ID, routingDomains(service, operation), target); err != nil {
+	ctx, cancel := m.operationContext(m.Config.Server.RequestTimeout)
+	defer cancel()
+	if err := m.Caddy.Active(ctx, service.ID, routingDomains(service, operation), target); err != nil {
 		m.failDeferred(service, requestID, err)
 		return
 	}
 	if operation == "resume" && m.Docker != nil {
-		if err := m.Docker.RemoveSlot(context.Background(), service.ID, service.LiveDeploy); err != nil && m.Logger != nil {
+		if err := m.Docker.RemoveSlot(ctx, service.ID, service.LiveDeploy); err != nil && m.Logger != nil {
 			m.Logger.Warn("remove previous resume slot", "service_id", service.ID, "slot", service.LiveDeploy, "error", err)
 		}
 	}
@@ -817,9 +832,12 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 		}
 		service.Phase, service.UpdatedAt = "draining", time.Now().UTC()
 		m.putDeferred(service)
-		if err := cleanupOldDeploy(context.Background(), m.Config.Deployment.TrafficDrain, func(ctx context.Context) error {
+		cleanupCtx, cleanupCancel := m.operationContext(m.Config.Deployment.TrafficDrain + m.Config.Server.RequestTimeout)
+		err := cleanupOldDeploy(cleanupCtx, m.Config.Deployment.TrafficDrain, func(ctx context.Context) error {
 			return m.Docker.RemoveSlot(ctx, service.ID, service.LiveDeploy)
-		}); err != nil {
+		})
+		cleanupCancel()
+		if err != nil {
 			m.failDeferred(service, requestID, err)
 			return
 		}
@@ -833,7 +851,7 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 	}
 	m.putDeferred(service)
 	if m.dnsEnabled() {
-		go m.syncDNS(service.ID, service.MainDomain, service.PublicIPv4)
+		m.enqueueDNS(service.ID, service.MainDomain, service.PublicIPv4)
 	}
 	m.notifyAsync(operation, true, service, requestID, "")
 }
@@ -844,10 +862,12 @@ func (m *Manager) finishRouting(id, operation, requestID string) {
 		return
 	}
 	var err error
+	ctx, cancel := m.operationContext(m.Config.Server.RequestTimeout)
+	defer cancel()
 	if operation == model.Suspended {
-		err = m.Caddy.Suspended(context.Background(), id, domains(service))
+		err = m.Caddy.Suspended(ctx, id, domains(service))
 	} else {
-		err = m.Caddy.Remove(context.Background(), id)
+		err = m.Caddy.Remove(ctx, id)
 	}
 	if err != nil {
 		m.failDeferred(service, requestID, err)
@@ -862,7 +882,9 @@ func (m *Manager) finishRouting(id, operation, requestID string) {
 }
 
 func (m *Manager) finishDelete(tombstone model.Tombstone, service model.Service, requestID string) {
-	if err := m.Caddy.Remove(context.Background(), tombstone.ID); err != nil {
+	ctx, cancel := m.operationContext(m.Config.Server.RequestTimeout)
+	defer cancel()
+	if err := m.Caddy.Remove(ctx, tombstone.ID); err != nil {
 		tombstone.Phase, tombstone.LastError, tombstone.UpdatedAt = "failed", err.Error(), time.Now().UTC()
 		m.mu.Lock()
 		_ = m.Repo.PutTombstone(tombstone)
@@ -913,7 +935,7 @@ func (m *Manager) failDeferred(service model.Service, requestID string, operatio
 
 func (m *Manager) notifyAsync(operation string, success bool, service model.Service, requestID, detail string) {
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(m.backgroundContext(), 5*time.Second)
 		defer cancel()
 		if err := m.Notify.Send(ctx, operation, success, service, requestID, detail); err != nil && m.Logger != nil {
 			m.Logger.Warn("notification failed", "operation", operation, "service_id", service.ID, "request_id", requestID, "error", err)
@@ -926,16 +948,18 @@ func (m *Manager) queueDNS(service model.Service) (model.Service, error) {
 		return service, nil
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	latest, err := m.Repo.Get(service.ID)
 	if err != nil {
+		m.mu.Unlock()
 		return service, err
 	}
 	latest.DNSStatus, latest.DNSLastError, latest.UpdatedAt = "pending", "", time.Now().UTC()
 	if err := m.Repo.Put(latest); err != nil {
+		m.mu.Unlock()
 		return service, err
 	}
-	go m.syncDNS(latest.ID, latest.MainDomain, latest.PublicIPv4)
+	m.mu.Unlock()
+	m.enqueueDNS(latest.ID, latest.MainDomain, latest.PublicIPv4)
 	return latest, nil
 }
 
@@ -955,19 +979,102 @@ func (m *Manager) ReconnectDNS(id string) error {
 
 func (m *Manager) dnsEnabled() bool { return m.Config.DNSWebhook.URL != "" }
 
-func (m *Manager) syncDNS(id, domain, publicIPv4 string) {
+func (m *Manager) StartDNSWorker() {
+	if !m.dnsEnabled() {
+		return
+	}
+	m.mu.Lock()
+	if m.dnsWake != nil {
+		m.mu.Unlock()
+		return
+	}
+	m.dnsWake = make(chan struct{}, 1)
+	m.dnsPending = map[string]dnsUpdate{}
+	wake := m.dnsWake
+	m.mu.Unlock()
+	go m.runDNSWorker(wake)
+}
+
+func (m *Manager) enqueueDNS(id, domain, publicIPv4 string) {
+	if m.backgroundContext().Err() != nil {
+		return
+	}
+	m.StartDNSWorker()
+	m.mu.Lock()
+	if m.dnsWake == nil || m.dnsPending == nil {
+		m.mu.Unlock()
+		return
+	}
+	update := dnsUpdate{id: id, domain: domain, publicIPv4: publicIPv4}
+	if m.dnsActive == update {
+		m.mu.Unlock()
+		return
+	}
+	m.dnsPending[id] = update
+	wake := m.dnsWake
+	m.mu.Unlock()
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) runDNSWorker(wake <-chan struct{}) {
+	ctx := m.backgroundContext()
+	defer func() {
+		m.mu.Lock()
+		m.dnsPending = nil
+		m.dnsActive = dnsUpdate{}
+		m.mu.Unlock()
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		}
+		for {
+			m.mu.Lock()
+			var update dnsUpdate
+			for id, pending := range m.dnsPending {
+				update = pending
+				delete(m.dnsPending, id)
+				break
+			}
+			m.dnsActive = update
+			m.mu.Unlock()
+			if update.id == "" {
+				break
+			}
+			m.syncDNS(ctx, update.id, update.domain, update.publicIPv4)
+			m.mu.Lock()
+			m.dnsActive = dnsUpdate{}
+			m.mu.Unlock()
+		}
+	}
+}
+
+func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 	backoffs := m.dnsBackoffs
 	if backoffs == nil {
 		backoffs = []time.Duration{0, 30 * time.Second, 5 * time.Minute}
 	}
 	var err error
 	for _, backoff := range backoffs {
-		if backoff > 0 {
-			time.Sleep(backoff)
+		if err = ctx.Err(); err != nil {
+			return
 		}
-		err = m.callDNSWebhook(domain, publicIPv4)
+		if backoff > 0 {
+			if err = wait(ctx, backoff); err != nil {
+				return
+			}
+		}
+		err = m.callDNSWebhook(ctx, domain, publicIPv4)
 		if err == nil {
 			break
+		}
+		if ctx.Err() != nil {
+			return
 		}
 	}
 
@@ -988,7 +1095,7 @@ func (m *Manager) syncDNS(id, domain, publicIPv4 string) {
 	}
 }
 
-func (m *Manager) callDNSWebhook(domain, publicIPv4 string) error {
+func (m *Manager) callDNSWebhook(parent context.Context, domain, publicIPv4 string) error {
 	rendered := strings.NewReplacer("{domain}", jsonString(domain), "{ipv4}", jsonString(publicIPv4)).Replace(m.Config.DNSWebhook.Body)
 	headerBlock, body, ok := strings.Cut(strings.ReplaceAll(rendered, "\r\n", "\n"), "\n\n")
 	if !ok {
@@ -998,7 +1105,7 @@ func (m *Manager) callDNSWebhook(domain, publicIPv4 string) error {
 	if err != nil {
 		return fmt.Errorf("parse dns_webhook.body headers: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), m.Config.DNSWebhook.Timeout)
+	ctx, cancel := context.WithTimeout(parent, m.Config.DNSWebhook.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.Config.DNSWebhook.URL, bytes.NewBufferString(body))
 	if err != nil {
@@ -1398,12 +1505,16 @@ func deployment(socket, id, slot string, version ...string) model.Deploy {
 }
 
 func domains(service model.Service) []string {
-	return []string{service.MainDomain, service.StagingDomain}
+	domains := []string{service.MainDomain}
+	if service.StagingDomain != "" {
+		domains = append(domains, service.StagingDomain)
+	}
+	return domains
 }
 
 func routingDomains(service model.Service, operation string) []string {
 	if operation == "upgrade" && service.TargetMainDomain != "" {
-		return []string{service.TargetMainDomain, service.TargetStagingDomain}
+		service.MainDomain, service.StagingDomain = service.TargetMainDomain, service.TargetStagingDomain
 	}
 	return domains(service)
 }
@@ -1453,7 +1564,24 @@ func compareVersions(a, b string) (int, bool) {
 	return 0, true
 }
 
+func (m *Manager) backgroundContext() context.Context {
+	if m.Context != nil {
+		return m.Context
+	}
+	return context.Background()
+}
+
+func (m *Manager) operationContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(m.backgroundContext())
+	}
+	return context.WithTimeout(m.backgroundContext(), timeout)
+}
+
 func wait(ctx context.Context, duration time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	select {
@@ -1465,7 +1593,6 @@ func wait(ctx context.Context, duration time.Duration) error {
 }
 
 func cleanupOldDeploy(ctx context.Context, drain time.Duration, remove func(context.Context) error) error {
-	ctx = context.WithoutCancel(ctx)
 	if err := wait(ctx, drain); err != nil {
 		return err
 	}

@@ -128,20 +128,27 @@ func TestRoutingDomainsUsesPendingHostname(t *testing.T) {
 	if got := routingDomains(service, "resume"); got[0] != service.MainDomain || got[1] != service.StagingDomain {
 		t.Fatalf("resume used pending hostname: %#v", got)
 	}
+	service.StagingDomain, service.TargetStagingDomain = "", ""
+	if got := routingDomains(service, "resume"); len(got) != 1 || got[0] != service.MainDomain {
+		t.Fatalf("resume routed empty staging hostname: %#v", got)
+	}
+	if got := routingDomains(service, "upgrade"); len(got) != 1 || got[0] != service.TargetMainDomain {
+		t.Fatalf("upgrade routed empty staging hostname: %#v", got)
+	}
 }
 
-func TestCleanupOldDeploySurvivesRequestCancellation(t *testing.T) {
+func TestCleanupOldDeployHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	removed := false
 	if err := cleanupOldDeploy(ctx, 0, func(ctx context.Context) error {
 		removed = true
 		return ctx.Err()
-	}); err != nil {
-		t.Fatal(err)
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cleanup error = %v", err)
 	}
-	if !removed {
-		t.Fatal("old deployment was not removed")
+	if removed {
+		t.Fatal("old deployment ran after cancellation")
 	}
 }
 
@@ -185,10 +192,6 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 	domain, err := NormalizeDomain("WWW.Example.COM.AU.")
 	if err != nil || domain != "www.example.com.au" {
 		t.Fatalf("NormalizeDomain() = %q, %v", domain, err)
-	}
-	staging, err := DeriveStaging(domain, "staging.com")
-	if err != nil || staging != "www-example-com-au.staging.com" {
-		t.Fatalf("DeriveStaging() = %q, %v", staging, err)
 	}
 	for _, invalid := range []string{"example", "bad value.com", "x;import.example"} {
 		if _, err := NormalizeDomain(invalid); err == nil {
@@ -251,12 +254,12 @@ func TestNormalizePackage(t *testing.T) {
 }
 
 func TestProvisionRejectsInvalidPublicIPv4(t *testing.T) {
-	manager := Manager{Config: config.Config{Domains: config.Domains{StagingSuffix: "staging.test"}}}
+	manager := Manager{}
 	_, _, err := manager.Provision(t.Context(), "whmcs-123", model.ProvisionRequest{
-		MainDomain: "example.com", PublicIPv4: "2001:db8::1", Version: "v1",
+		MainDomain: "example.com", StagingDomain: " ", PublicIPv4: "2001:db8::1", Version: "v1",
 	}, "request-1")
 	var apiErr *Error
-	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest {
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest || !strings.Contains(err.Error(), "public_ipv4") {
 		t.Fatalf("Provision() error = %v", err)
 	}
 }
@@ -274,7 +277,7 @@ func TestDNSWebhookRendersJSONEscapedValues(t *testing.T) {
 			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
 		})},
 	}
-	if err := manager.callDNSWebhook("quote\".example", "line\nfeed"); err != nil {
+	if err := manager.callDNSWebhook(t.Context(), "quote\".example", "line\nfeed"); err != nil {
 		t.Fatal(err)
 	}
 	if gotAuthorization != "Bearer token" || gotBody != `{"domain":"quote\".example","ipv4":"line\nfeed"}` {
@@ -315,7 +318,7 @@ func TestDNSFailureDoesNotChangeRunningWorkload(t *testing.T) {
 			return &http.Response{StatusCode: 500, Status: "500 Internal Server Error", Body: io.NopCloser(bytes.NewReader(nil))}, nil
 		})},
 	}
-	manager.syncDNS(service.ID, service.MainDomain, service.PublicIPv4)
+	manager.syncDNS(t.Context(), service.ID, service.MainDomain, service.PublicIPv4)
 	got, err := repo.Get(service.ID)
 	if err != nil || got.DNSStatus != "error" || got.DNSLastError == "" || got.State != model.Active || got.Phase != "running" {
 		t.Fatalf("service after DNS failure = %#v, %v", got, err)
@@ -329,7 +332,7 @@ func TestDNSFailureDoesNotChangeRunningWorkload(t *testing.T) {
 		<-request.Context().Done()
 		return nil, request.Context().Err()
 	})
-	manager.syncDNS(service.ID, service.MainDomain, service.PublicIPv4)
+	manager.syncDNS(t.Context(), service.ID, service.MainDomain, service.PublicIPv4)
 	got, _ = repo.Get(service.ID)
 	if got.DNSStatus != "error" || !strings.Contains(got.DNSLastError, "deadline exceeded") || got.Phase != "running" {
 		t.Fatalf("service after DNS timeout = %#v", got)
@@ -348,7 +351,7 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	}
 	var calls atomic.Int32
 	manager := Manager{
-		Repo: repo, dnsBackoffs: []time.Duration{0, 0, 0},
+		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0, 0, 0},
 		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			status := 500
@@ -390,7 +393,7 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	}
 }
 
-func TestReconnectDNSQueuesRepeatedRequests(t *testing.T) {
+func TestReconnectDNSCoalescesRepeatedRequests(t *testing.T) {
 	root := t.TempDir()
 	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
 	if err := repo.Init(); err != nil {
@@ -400,11 +403,13 @@ func TestReconnectDNSQueuesRepeatedRequests(t *testing.T) {
 	if err := repo.Put(service); err != nil {
 		t.Fatal(err)
 	}
-	started, release := make(chan struct{}, 2), make(chan struct{}, 2)
+	started, release := make(chan struct{}, 2), make(chan struct{})
+	var calls atomic.Int32
 	manager := Manager{
-		Repo: repo, dnsBackoffs: []time.Duration{0},
+		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0},
 		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
 			started <- struct{}{}
 			<-release
 			return &http.Response{StatusCode: http.StatusNoContent, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
@@ -417,20 +422,111 @@ func TestReconnectDNSQueuesRepeatedRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	<-started
 	queued, _ := repo.Get(service.ID)
 	if queued.DNSStatus != "pending" || queued.DNSLastError != "" {
 		t.Fatalf("queued DNS state = %#v", queued)
 	}
-	release <- struct{}{}
-	release <- struct{}{}
+	close(release)
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 		queued, _ = repo.Get(service.ID)
-		if queued.DNSStatus == "in_sync" {
+		if queued.DNSStatus == "in_sync" && calls.Load() == 1 {
 			return
 		}
 	}
-	t.Fatalf("reconnected DNS state = %#v", queued)
+	t.Fatalf("reconnected DNS state = %#v, calls=%d", queued, calls.Load())
+}
+
+func TestDNSWorkerIsSerialAndKeepsLatestQueuedValue(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	first := model.Service{ID: "whmcs-1", MainDomain: "first.example", PublicIPv4: "203.0.113.1", DNSStatus: "pending"}
+	second := model.Service{ID: "whmcs-2", MainDomain: "latest.example", PublicIPv4: "203.0.113.3", DNSStatus: "pending"}
+	if err := repo.Put(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Put(second); err != nil {
+		t.Fatal(err)
+	}
+
+	started, release := make(chan struct{}, 2), make(chan struct{})
+	bodies := make(chan string, 2)
+	var calls, active, maximum atomic.Int32
+	manager := Manager{
+		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0},
+		Config: config.Config{DNSWebhook: config.DNSWebhook{
+			URL: "https://dns.example/hook", Timeout: time.Second,
+			Body: "Content-Type: application/json\n\n{\"domain\":\"{domain}\",\"ipv4\":\"{ipv4}\"}",
+		}},
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			current := active.Add(1)
+			for previous := maximum.Load(); current > previous && !maximum.CompareAndSwap(previous, current); previous = maximum.Load() {
+			}
+			defer active.Add(-1)
+			body, _ := io.ReadAll(request.Body)
+			bodies <- string(body)
+			call := calls.Add(1)
+			started <- struct{}{}
+			if call == 1 {
+				<-release
+			}
+			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		})},
+	}
+	manager.enqueueDNS(first.ID, first.MainDomain, first.PublicIPv4)
+	<-started
+	manager.enqueueDNS(second.ID, "obsolete.example", "203.0.113.2")
+	manager.enqueueDNS(second.ID, second.MainDomain, second.PublicIPv4)
+	close(release)
+	<-started
+
+	firstBody, secondBody := <-bodies, <-bodies
+	if maximum.Load() != 1 || !strings.Contains(firstBody, first.MainDomain) || !strings.Contains(secondBody, second.MainDomain) || strings.Contains(secondBody, "obsolete") {
+		t.Fatalf("DNS worker concurrency=%d, bodies=%q / %q", maximum.Load(), firstBody, secondBody)
+	}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		got, _ := repo.Get(second.ID)
+		if got.DNSStatus == "in_sync" {
+			return
+		}
+	}
+	t.Fatal("latest queued DNS result was not persisted")
+}
+
+func TestDNSWorkerCancellationInterruptsBackoff(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{ID: "whmcs-1", MainDomain: "example.com", PublicIPv4: "203.0.113.1", DNSStatus: "pending"}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	called := make(chan struct{}, 1)
+	manager := Manager{
+		Context: ctx, Repo: repo, dnsBackoffs: []time.Duration{0, time.Hour},
+		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			called <- struct{}{}
+			return &http.Response{StatusCode: 500, Status: "500 Internal Server Error", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		})},
+	}
+	manager.enqueueDNS(service.ID, service.MainDomain, service.PublicIPv4)
+	<-called
+	cancel()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		manager.mu.Lock()
+		stopped := manager.dnsPending == nil && manager.dnsActive.id == ""
+		manager.mu.Unlock()
+		if stopped {
+			return
+		}
+	}
+	t.Fatal("DNS worker did not stop after cancellation")
 }
 
 func TestReconnectDNSRejectsDisabledAndMissingServices(t *testing.T) {
@@ -482,7 +578,7 @@ func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := Manager{
-		Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, dnsBackoffs: []time.Duration{0},
+		Context: t.Context(), Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, dnsBackoffs: []time.Duration{0},
 		Caddy:          caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
 		Config:         config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
 		healthAttempts: map[string]uint64{service.ID: 1},
@@ -530,6 +626,9 @@ func TestResumeHealthSwitchesToOppositeSlot(t *testing.T) {
 		Caddy: caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
 	}
 	manager.finishHealth(service, "resume", "request-1", 1)
+	if _, ok := manager.healthAttempts[service.ID]; ok {
+		t.Fatal("completed health attempt remained in memory")
+	}
 	got, err := repo.Get(service.ID)
 	if err != nil || got.State != model.Active || got.Phase != "running" || got.LiveDeploy != "green" || got.Package["plan"] != "new" || got.TargetPackage != nil {
 		t.Fatalf("resumed service = %#v, %v", got, err)
@@ -559,6 +658,9 @@ func TestSupersededHealthResultIsIgnored(t *testing.T) {
 	}
 	manager := Manager{Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, healthAttempts: map[string]uint64{service.ID: 2}}
 	manager.finishHealth(service, "upgrade", "old-request", 1)
+	if manager.healthAttempts[service.ID] != 2 {
+		t.Fatal("stale health result removed the current generation")
+	}
 	got, err := repo.Get(service.ID)
 	if err != nil || got.Phase != "waiting_for_health" || got.TargetVersion != "v3" || got.Deploy["green"].Health != "checking" {
 		t.Fatalf("replacement was overwritten by stale health result: %#v, %v", got, err)

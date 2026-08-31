@@ -171,6 +171,7 @@ The master Caddyfile is operator-owned; the controller only creates files in
 | --- | --- |
 | `docker.network` | Existing Docker network joined by every service container. |
 | `docker.image_repository` | Allowed image repository, without a tag. |
+| `docker.pull_timeout` | Optional image-pull deadline; defaults to `30m`. |
 | `docker.binds` | Fixed bind mounts applied to every service container. |
 | `docker.environment` | Additional fixed `KEY=value` environment entries. |
 
@@ -206,15 +207,15 @@ before changing mounts.
 | `deployment.health_backoff_increment` | Increasing delay between checks. |
 | `deployment.traffic_drain` | Wait before removing the old deployment. |
 | `deployment.socket` | Host, container, and Caddy-visible Unix-socket path template; supports `{service_id}` and `{slot}`. |
-| `domains.staging_suffix` | Suffix used when WHMCS supplies no staging domain. |
+| `domains.staging_suffix` | Suffix appended to staging labels supplied by WHMCS. |
 | `dns_webhook.url` | DNS update endpoint; omit or leave empty to disable updates. |
 | `dns_webhook.body` | HTTP headers, a blank line, and body template supporting `{domain}` and `{ipv4}`. |
 | `dns_webhook.timeout` | Timeout for each DNS update attempt. |
 
-For example, `example.com` with suffix `staging.com` becomes
-`example-com.staging.com`. A deployment is routed only after the health
-endpoint returns HTTP 2xx. Failed provision and upgrade artifacts remain in
-place for diagnosis.
+For example, staging label `preview` with suffix `staging.com` becomes
+`preview.staging.com`. A deployment is routed only after the health endpoint
+returns HTTP 2xx. Failed provision and upgrade artifacts remain in place for
+diagnosis.
 
 DNS updates run after healthy routing without blocking the site. Failures are
 recorded in service status and retried twice after 30 seconds and 5 minutes.
@@ -253,8 +254,8 @@ In WHMCS:
    slug/name components are sent as `Unknown`. Configure option names as
    `code|Display Label` using lowercase snake-case codes and machine-readable values.
 7. On each service, enter an available controller image tag in **Image Version**.
-8. Leave **Staging Hostname** blank for automatic derivation, or enter a label
-   of up to 32 characters; the controller's staging suffix is appended.
+8. Leave **Staging Hostname** blank to disable staging, or enter a label of up
+   to 32 characters; the controller's staging suffix is appended.
 9. Activate **Modd Hosting** under addon modules and restrict it to trusted
    administrator roles.
 10. Set a unique **Docker Hub Webhook Token**, then copy the webhook URL from

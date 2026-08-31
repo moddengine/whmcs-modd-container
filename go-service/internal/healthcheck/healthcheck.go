@@ -38,6 +38,7 @@ func (c Checker) Check(ctx context.Context, socket string) error {
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			if readErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				transport.CloseIdleConnections()
 				return nil
 			}
 			last = fmt.Errorf("status %d: %s", resp.StatusCode, body)

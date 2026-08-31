@@ -144,7 +144,7 @@ paths:
       operationId: deleteService
       responses:
         "200": { description: Deletion already complete, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
-        "202": { description: Resources removed; routing cleanup continues, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
+        "202": { description: Resources removed; deletion finalization continues, content: { application/json: { schema: { $ref: "#/components/schemas/ActionResult" } } } }
         "409": { $ref: "#/components/responses/Error" }
   /v1/services/{id}/suspend:
     post:
@@ -348,7 +348,7 @@ components:
         containers: { type: array, items: { type: object } }
         metrics: { type: object }
         warnings: { type: array, items: { type: string } }
-      required: [id, state, phase, main_domain, staging_domain, public_ipv4, version, live_deploy, message, deployments, warnings]
+      required: [id, state, phase, main_domain, public_ipv4, version, live_deploy, message, deployments, warnings]
     DeploymentStatus:
       type: object
       properties:

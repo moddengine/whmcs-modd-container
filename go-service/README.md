@@ -24,6 +24,8 @@ most recently pushed `v*` tag; a non-empty value pulls that exact tag. The
 endpoint returns `202` immediately. `GET /v1/image/pull` reports its in-memory
 pending, completed, or failed state. Private tag discovery reuses the Docker
 CLI username and password or access token configured by `docker login`.
+Image pulls time out after `docker.pull_timeout`, which defaults to 30 minutes
+when omitted.
 
 The example binds to `127.0.0.1`. For containerized Caddy, use host networking
 or bind the controller to a firewall-restricted address on Caddy's network.

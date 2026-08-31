@@ -52,10 +52,12 @@ type Caddy struct {
 	ReloadCommand    []string `toml:"reload_command"`
 }
 type Docker struct {
-	Network         string   `toml:"network"`
-	ImageRepository string   `toml:"image_repository"`
-	Binds           []string `toml:"binds"`
-	Environment     []string `toml:"environment"`
+	Network         string        `toml:"network"`
+	ImageRepository string        `toml:"image_repository"`
+	Binds           []string      `toml:"binds"`
+	Environment     []string      `toml:"environment"`
+	PullTimeout     time.Duration `toml:"-"`
+	PullTimeoutRaw  string        `toml:"pull_timeout"`
 }
 type Deployment struct {
 	HealthPath         string        `toml:"health_path"`
@@ -90,6 +92,9 @@ func Load(path string) (Config, error) {
 	if err = toml.Unmarshal(b, &c); err != nil {
 		return c, fmt.Errorf("parse config: %w", err)
 	}
+	if c.Docker.PullTimeoutRaw == "" {
+		c.Docker.PullTimeout = 30 * time.Minute
+	}
 	durations := []struct {
 		raw string
 		dst *time.Duration
@@ -99,6 +104,12 @@ func Load(path string) (Config, error) {
 		{c.Deployment.HealthInitialRaw, &c.Deployment.HealthInitialDelay},
 		{c.Deployment.HealthBackoffRaw, &c.Deployment.HealthBackoff},
 		{c.Deployment.TrafficDrainRaw, &c.Deployment.TrafficDrain},
+	}
+	if c.Docker.PullTimeoutRaw != "" {
+		durations = append(durations, struct {
+			raw string
+			dst *time.Duration
+		}{c.Docker.PullTimeoutRaw, &c.Docker.PullTimeout})
 	}
 	if c.DNSWebhook.URL != "" {
 		durations = append(durations, struct {
@@ -142,6 +153,9 @@ func (c Config) Validate() error {
 	}
 	if c.Docker.ImageRepository == "" || c.Docker.Network == "" {
 		return errors.New("docker image_repository and network are required")
+	}
+	if c.Docker.PullTimeout <= 0 {
+		return errors.New("docker.pull_timeout must be positive")
 	}
 	if c.Deployment.HealthAttempts < 1 || c.Deployment.HealthInitialDelay < 0 || c.Deployment.HealthBackoff < 0 || c.Deployment.TrafficDrain < 0 {
 		return errors.New("deployment health settings and traffic drain are invalid")

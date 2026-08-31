@@ -34,6 +34,7 @@ const maxBody = 1 << 20
 type API struct {
 	Manager   *service.Manager
 	Config    config.Config
+	Context   context.Context
 	Token     string
 	Logger    *slog.Logger
 	Version   string
@@ -137,7 +138,17 @@ func (a *API) pullImage(w http.ResponseWriter, r *http.Request) {
 	a.pullMu.Unlock()
 	requestID := requestID(r)
 	go func() {
-		pulled, err := a.Manager.Docker.Pull(context.Background(), version)
+		ctx := a.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		timeout := a.Config.Docker.PullTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Minute
+		}
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		pulled, err := a.Manager.Docker.Pull(ctx, version)
 		if err != nil {
 			a.setImagePullStatus(imagePullStatus{Status: "failed", Version: queued, Error: err.Error()})
 			a.Logger.Error("image pull failed", "request_id", requestID, "version", version, "error", err)

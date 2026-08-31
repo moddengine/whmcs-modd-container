@@ -144,7 +144,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
         $deployedHost = (string) ($status['main_domain'] ?? '');
         $deployedStaging = (string) ($status['staging_domain'] ?? '');
         $inSync = $deployedHost !== '' && $requestedHost === $deployedHost
-            && ($requestedStaging === '' || $requestedStaging === $deployedStaging);
+            && $requestedStaging === $deployedStaging;
         $busy = in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining'], true);
         if ($inSync) {
             $hostnameStatus = '<span class="text-success">&#10003; In sync</span>';
@@ -165,7 +165,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
         return [
             'Image Version' => '<select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
             'Staging Hostname' => '<div class="input-group" style="max-width:500px"><input type="text" name="modulefields[1]" class="form-control" maxlength="32" value="'
-                . moddhosting_escape($stagingLabel) . '" placeholder="Blank for automatic derivation"><span class="input-group-addon">.'
+                . moddhosting_escape($stagingLabel) . '" placeholder="Blank to disable staging"><span class="input-group-addon">.'
                 . moddhosting_escape($stagingSuffix) . '</span></div>',
             'Deployed Hostname' => moddhosting_escape($deployedHost !== '' ? $deployedHost : 'not provisioned'),
             'Deployed Staging Hostname' => moddhosting_escape($deployedStaging !== '' ? $deployedStaging : 'not provisioned'),

@@ -13,9 +13,9 @@ Choose the image version on each service's admin page; choices come from the
 selected controller with the most recent image first. Save the service before
 running Create for initial provisioning or Deploy to reconcile its hostname and image.
 The staging hostname field accepts a label of up to 32 characters and displays
-the controller's configured suffix beside it. Per-service image versions and
-staging labels are kept in `mod_moddhosting_services`, not customer-visible
-custom fields.
+the controller's configured suffix beside it; leave it blank to disable staging.
+Per-service image versions and staging labels are kept in
+`mod_moddhosting_services`, not customer-visible custom fields.
 Configurable option names must use `code|Display Label`, where `code` is
 lowercase snake case, and their selectable values should likewise use
 `value|Display Label`. Product and product-group slugs provide the package

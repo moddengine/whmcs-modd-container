@@ -28,6 +28,7 @@ reload_command = ["docker", "exec", "caddy", "caddy", "reload", "--config", "/et
 [docker]
 network = "udo-net"
 image_repository = "whmcs-runtime"
+pull_timeout = "30m"
 binds = [
   "{mountpoint}/site:/srv/modd/site",
   "{mountpoint}/backup:/srv/modd/backup",

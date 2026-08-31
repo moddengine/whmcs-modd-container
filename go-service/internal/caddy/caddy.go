@@ -1,7 +1,6 @@
 package caddy
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -133,15 +132,33 @@ func run(ctx context.Context, command []string) error {
 	if len(command) == 0 {
 		return errors.New("command is not configured")
 	}
-	var output bytes.Buffer
+	output := limitedBuffer{limit: 4096}
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Stdout, cmd.Stderr = &output, &output
 	if err := cmd.Run(); err != nil {
 		text := output.String()
-		if len(text) > 4096 {
-			text = text[:4096]
+		if output.truncated {
+			text += "\n[output truncated]"
 		}
 		return fmt.Errorf("%w: %s", err, text)
 	}
 	return nil
 }
+
+type limitedBuffer struct {
+	buf       []byte
+	limit     int
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := b.limit - len(b.buf)
+	if remaining > 0 {
+		b.buf = append(b.buf, p[:min(remaining, len(p))]...)
+	}
+	b.truncated = b.truncated || len(p) > remaining
+	return n, nil
+}
+
+func (b *limitedBuffer) String() string { return string(b.buf) }

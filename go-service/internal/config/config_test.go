@@ -15,8 +15,38 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if config.Server.Listen != "127.0.0.1:8443" ||
 		config.Deployment.TrafficDrain != 10*time.Second ||
-		config.Deployment.HealthAttempts != 30 || config.DNSWebhook.Timeout != 30*time.Second {
+		config.Deployment.HealthAttempts != 30 || config.DNSWebhook.Timeout != 30*time.Second || config.Docker.PullTimeout != 30*time.Minute {
 		t.Fatalf("unexpected example config: %#v", config)
+	}
+}
+
+func TestDockerPullTimeoutDefaultsWhenOmitted(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = []byte(strings.Replace(string(content), "pull_timeout = \"30m\"\n", "", 1))
+	path := filepath.Join(t.TempDir(), "controller.toml")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := Load(path)
+	if err != nil || config.Docker.PullTimeout != 30*time.Minute {
+		t.Fatalf("default pull timeout = %s, %v", config.Docker.PullTimeout, err)
+	}
+}
+
+func TestDockerPullTimeoutMustBePositive(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "controller.toml")
+	if err := os.WriteFile(path, []byte(strings.Replace(string(content), `pull_timeout = "30m"`, `pull_timeout = "0s"`, 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("zero docker.pull_timeout was accepted")
 	}
 }
 
