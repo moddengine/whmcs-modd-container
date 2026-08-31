@@ -30,6 +30,10 @@ func TestRenderAndStatus(t *testing.T) {
 	if strings.Contains(string(content), "import") {
 		t.Fatal("renderer allowed unexpected directives")
 	}
+	mapping, _ := os.ReadFile(filepath.Join(dir, "whmcs-123.map"))
+	if got, want := string(mapping), "example.com "+socket+"\nexample-com.staging.com "+socket+"\n"; got != want {
+		t.Fatalf("rendered map = %q, want %q", got, want)
+	}
 	replacement := "/modd/http/whmcs-123-green/http.sock"
 	if err := adapter.Active(context.Background(), "whmcs-123", []string{"example.com"}, "green"); err != nil {
 		t.Fatal(err)
@@ -37,6 +41,10 @@ func TestRenderAndStatus(t *testing.T) {
 	_, _, gotSocket, err = adapter.Status("whmcs-123")
 	if err != nil || gotSocket != replacement {
 		t.Fatalf("Active() did not replace stale config: %q, %v", gotSocket, err)
+	}
+	mapping, _ = os.ReadFile(filepath.Join(dir, "whmcs-123.map"))
+	if got, want := string(mapping), "example.com "+replacement+"\n"; got != want {
+		t.Fatalf("Active() did not replace stale map: %q, want %q", got, want)
 	}
 }
 

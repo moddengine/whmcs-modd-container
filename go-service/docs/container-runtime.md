@@ -22,6 +22,7 @@ Each service has these durable and observed resources:
 | `WHMCS-<id>-blue` / `-green` | Alternating Docker deployment slots. |
 | `<deployment.socket>` | Slot-specific `http.sock` used by health checks and Caddy. |
 | `<caddy.service_config_dir>/<id>.caddy` | Routing for the main and optional staging domains. |
+| `<caddy.service_config_dir>/<id>.map` | Active hostname-to-socket map entries. |
 | `<state.tombstones_dir>/<id>.toml` | Permanent record left after deletion. It prevents accidental reuse of the ID. |
 
 The TOML record is the controller's lifecycle journal, but status is not taken
@@ -155,9 +156,9 @@ a restart beyond Docker's configured restart policy.
 
 ## Caddy service files
 
-The controller owns only `<caddy.service_config_dir>/<id>.caddy`; the operator
-owns the master Caddyfile. The master must import the service directory, for
-example:
+The controller owns `<caddy.service_config_dir>/<id>.caddy` and its active
+`<id>.map` sidecar; the operator owns the master Caddyfile. The master must
+import the service Caddyfiles, for example:
 
 ```caddyfile
 import /etc/caddy/services/*.caddy

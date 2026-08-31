@@ -23,16 +23,21 @@ type Adapter struct {
 
 func (a Adapter) Path(id string) string { return filepath.Join(a.Dir, id+".caddy") }
 
+func (a Adapter) mapPath(id string) string { return filepath.Join(a.Dir, id+".map") }
+
 func (a Adapter) Active(ctx context.Context, id string, domains []string, slot string) error {
 	var content strings.Builder
+	var mapping strings.Builder
+	socket := a.Socket(id, slot)
 	for _, domain := range domains {
 		content.WriteString(strings.NewReplacer(
 			"{domain}", domain,
 			"{service_id}", id,
 			"{slot}", slot,
 		).Replace(a.ActiveTemplate))
+		fmt.Fprintf(&mapping, "%s %s\n", domain, socket)
 	}
-	return a.replace(ctx, id, content.String())
+	return a.replace(ctx, id, content.String(), mapping.String())
 }
 
 func (a Adapter) Socket(id, slot string) string {
@@ -45,27 +50,22 @@ func (a Adapter) Socket(id, slot string) string {
 
 func (a Adapter) Suspended(ctx context.Context, id string, domains []string) error {
 	content := fmt.Sprintf("%s {\n\troot * %s\n\ttry_files {path} /index.html\n\tfile_server\n}\n", strings.Join(domains, ", "), a.SuspensionRoot)
-	return a.replace(ctx, id, content)
+	return a.replace(ctx, id, content, "")
 }
 
 func (a Adapter) Remove(ctx context.Context, id string) error {
-	path := a.Path(id)
-	old, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	_, caddyErr := os.Stat(a.Path(id))
+	_, mapErr := os.Stat(a.mapPath(id))
+	if errors.Is(caddyErr, os.ErrNotExist) && errors.Is(mapErr, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil {
-		return err
+	if caddyErr != nil && !errors.Is(caddyErr, os.ErrNotExist) {
+		return caddyErr
 	}
-	if err := os.Remove(path); err != nil {
-		return err
+	if mapErr != nil && !errors.Is(mapErr, os.ErrNotExist) {
+		return mapErr
 	}
-	if err := a.apply(ctx); err != nil {
-		_ = os.WriteFile(path, old, 0640)
-		_ = a.apply(ctx)
-		return err
-	}
-	return nil
+	return a.replace(ctx, id, "", "")
 }
 
 func (a Adapter) Status(id string) (configured bool, mode, socket string, err error) {
@@ -82,13 +82,37 @@ func (a Adapter) Status(id string) (configured bool, mode, socket string, err er
 	return true, "suspended", "", nil
 }
 
-func (a Adapter) replace(ctx context.Context, id, content string) error {
+func (a Adapter) replace(ctx context.Context, id, content, mapping string) error {
 	if err := os.MkdirAll(a.Dir, 0750); err != nil {
 		return err
 	}
-	path := a.Path(id)
-	old, oldErr := os.ReadFile(path)
-	tmp, err := os.CreateTemp(a.Dir, "."+id+".caddy-*")
+	paths := []string{a.Path(id), a.mapPath(id)}
+	contents := []string{content, mapping}
+	old := make([][]byte, len(paths))
+	oldErr := make([]error, len(paths))
+	for i, path := range paths {
+		old[i], oldErr[i] = os.ReadFile(path)
+		if err := replaceFile(path, contents[i]); err != nil {
+			restoreFiles(paths[:i], old[:i], oldErr[:i])
+			return err
+		}
+	}
+	if err := a.apply(ctx); err != nil {
+		restoreFiles(paths, old, oldErr)
+		_ = a.apply(ctx)
+		return err
+	}
+	return nil
+}
+
+func replaceFile(path, content string) error {
+	if content == "" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return err
 	}
@@ -103,19 +127,17 @@ func (a Adapter) replace(ctx context.Context, id, content string) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	if err = a.apply(ctx); err != nil {
-		if oldErr == nil {
-			_ = os.WriteFile(path, old, 0640)
+	return os.Rename(tmpPath, path)
+}
+
+func restoreFiles(paths []string, contents [][]byte, readErrs []error) {
+	for i, path := range paths {
+		if readErrs[i] == nil {
+			_ = os.WriteFile(path, contents[i], 0640)
 		} else {
 			_ = os.Remove(path)
 		}
-		_ = a.apply(ctx)
-		return err
 	}
-	return nil
 }
 
 func (a Adapter) apply(ctx context.Context) error {

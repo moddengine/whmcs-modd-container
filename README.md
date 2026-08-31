@@ -151,7 +151,7 @@ pool's snapshot and replication policy.
 
 | Setting | Purpose |
 | --- | --- |
-| `caddy.service_config_dir` | Host directory for generated service Caddyfiles. |
+| `caddy.service_config_dir` | Host directory for generated service Caddyfiles and hostname-to-socket map fragments. |
 | `caddy.suspension_root` | Directory containing the shared `index.html`. |
 | `caddy.active_template` | Active service Caddyfile template, repeated per domain; supports `{domain}`, `{service_id}`, and `{slot}`. |
 | `caddy.validate_command` | Argument array run after a service-file change. |
