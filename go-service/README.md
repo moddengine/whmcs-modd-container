@@ -14,6 +14,7 @@ it.
 
 Install the binary, `config.example.toml`, and systemd unit.
 Create the token with `openssl rand -hex 32`, restrict secret files to root,
+configure the local root and intermediate CA files under `[certificates]`,
 and expose the HTTP listener only to a Caddy proxy. Caddy must provide an HTTPS
 certificate trusted by the WHMCS host. Confirm the image's mounts against
 `docs/container-runtime.md` before provisioning.

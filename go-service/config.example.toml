@@ -33,9 +33,14 @@ binds = [
   "{mountpoint}/site:/srv/modd/site",
   "{mountpoint}/backup:/srv/modd/backup",
   "{mountpoint}/{slot}/cache:/srv/modd/cache",
-  "{mountpoint}/shared/secrets:/srv/modd/secrets:ro",
 ]
 environment = []
+
+[certificates]
+root_certificate = "/etc/modd-hosting/certificates/root.crt"
+intermediate_certificate = "/etc/modd-hosting/certificates/intermediate.crt"
+intermediate_key = "/etc/modd-hosting/certificates/intermediate.key"
+mount_path = "/srv/modd/secrets"
 
 [deployment]
 health_path = "/~/health/check"
