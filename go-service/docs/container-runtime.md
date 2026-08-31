@@ -59,8 +59,8 @@ Every container has:
 - user/group `10000 + service-id`;
 - labels `au.modd.managed`, `au.modd.service-id`, `au.modd.version`,
   `au.modd.app`, and `au.modd.deploy`;
-- `ME_SITE=<service-id>` and `ME_INSTANCE=<service-id>-<slot>`, plus configured
-  environment entries;
+- `ME_SITE=<service-id>`, `ME_INSTANCE=<service-id>-<slot>`, configured
+  environment entries, and the service's sorted `ME_PACKAGE_*` entries;
 - configured bind mounts with `{mountpoint}`, `{service_id}`, and `{slot}`
   expanded; and
 - the slot socket directory mounted at the identical host/container path.
@@ -78,7 +78,10 @@ Read-only bind sources are not changed.
 ## Provision: create and start
 
 `PUT /v1/services/{id}` accepts the main domain, optional staging domain,
-image version, and display name.
+image version, display name, and package values. Package codes are lowercase
+snake case and become uppercase environment suffixes. For example,
+`email_sends=500` becomes `ME_PACKAGE_EMAIL_SENDS=500`; WHMCS sends plan and
+group values as `<slug>|<display name>`.
 
 1. The controller validates the ID, normalizes domains to lowercase, and
    derives a staging domain when one was omitted. With the example suffix,
@@ -231,17 +234,20 @@ recorded live route, recreates the target cleanly, and repeats the switch.
    `unknown`.
 
 `POST /v1/services/{id}/resume` accepts either a suspended or terminated
-service:
+service and an optional current package map of at most 20 entries, each with a
+value of at most 250 characters:
 
-1. Persist phase `starting`, operation `resume`, and target the recorded live
-   slot/version.
+1. Persist phase `starting`, operation `resume`, and target the slot opposite
+   the recorded live slot.
 2. Recreate or verify the service identity and ownership.
-3. Start the existing live container after suspension, or create it after
-   termination removed it.
-4. Persist state `active`, phase `waiting_for_health`, and health `checking`,
-   then return `202`.
+3. Recreate the target-slot container with the supplied package environment,
+   falling back to the stored package when omitted. The stopped live-slot
+   container remains untouched until the target is healthy.
+4. Persist phase `waiting_for_health` and health `checking`, then return `202`.
 5. Only after health succeeds, replace the suspension page or missing route
-   with the active Caddy proxy and commit phase `running`.
+   with the active Caddy proxy, remove the previous stopped container, and
+   commit the target as live and phase `running`. Cleanup failures are logged
+   without failing the healthy resume.
 
 Thus a resumed application never receives traffic merely because Docker
 started it. A resume health failure leaves the previous suspension route in

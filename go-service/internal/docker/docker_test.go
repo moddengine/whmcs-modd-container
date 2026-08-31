@@ -205,6 +205,7 @@ func TestSortVersionsNewestFirst(t *testing.T) {
 func TestContainerSpec(t *testing.T) {
 	service := model.Service{
 		ID: "whmcs-123", MainDomain: "example.com", Version: "v21.6.24",
+		Package: map[string]string{"plan": "small|Small Hosting Plan", "email_sends": "500", "group": "website-hosting|Website Hosting"},
 		Dataset: model.DatasetRecord{Mountpoint: "/modd/sites/whmcs-123"},
 		Deploy:  map[string]model.Deploy{"blue": {Socket: "/run/whmcs/whmcs-123-blue/http.sock"}},
 	}
@@ -231,6 +232,13 @@ func TestContainerSpec(t *testing.T) {
 		if !slices.Contains(spec.Env, expected) {
 			t.Fatalf("environment placeholder was not expanded to %q: %#v", expected, spec.Env)
 		}
+	}
+	if !slices.Equal(spec.Env[len(spec.Env)-3:], []string{
+		"ME_PACKAGE_EMAIL_SENDS=500",
+		"ME_PACKAGE_GROUP=website-hosting|Website Hosting",
+		"ME_PACKAGE_PLAN=small|Small Hosting Plan",
+	}) {
+		t.Fatalf("package environment is not deterministic: %#v", spec.Env)
 	}
 	if !slices.Equal(host.Binds, []string{
 		"/modd/sites/whmcs-123/blue/cache:/cache",

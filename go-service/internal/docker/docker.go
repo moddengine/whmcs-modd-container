@@ -115,6 +115,14 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 		env = append(env, replacer.Replace(value))
 	}
 	env = append(env, "ME_SITE="+service.ID, "ME_INSTANCE="+service.ID+"-"+slot)
+	packageCodes := make([]string, 0, len(service.Package))
+	for code := range service.Package {
+		packageCodes = append(packageCodes, code)
+	}
+	sort.Strings(packageCodes)
+	for _, code := range packageCodes {
+		env = append(env, "ME_PACKAGE_"+strings.ToUpper(code)+"="+service.Package[code])
+	}
 	binds := make([]string, 0, len(cfg.Binds)+2)
 	for _, bind := range cfg.Binds {
 		binds = append(binds, replacer.Replace(bind))

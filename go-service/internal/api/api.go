@@ -202,7 +202,19 @@ func (a *API) suspend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) resume(w http.ResponseWriter, r *http.Request) {
-	a.action(w, r, a.Manager.Resume)
+	var request model.ResumeRequest
+	if r.Body != http.NoBody {
+		if err := decodeJSON(w, r, &request); err != nil {
+			a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
+			return
+		}
+	}
+	status, accepted, err := a.Manager.Resume(r.Context(), r.PathValue("id"), request, requestID(r))
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, acceptedCode(accepted), map[string]any{"service": status})
 }
 
 func (a *API) terminate(w http.ResponseWriter, r *http.Request) {

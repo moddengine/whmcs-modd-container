@@ -249,12 +249,15 @@ In WHMCS:
 3. Set the public Caddy HTTPS port, normally `443`.
 4. Store the bearer token as the server password.
 5. Create a product using that server.
-6. On each service, enter an available controller image tag in **Image Version**.
-7. Leave **Staging Hostname** blank for automatic derivation, or enter a label
+6. Give the product and product group stable slugs when available. Missing
+   slug/name components are sent as `Unknown`. Configure option names as
+   `code|Display Label` using lowercase snake-case codes and machine-readable values.
+7. On each service, enter an available controller image tag in **Image Version**.
+8. Leave **Staging Hostname** blank for automatic derivation, or enter a label
    of up to 32 characters; the controller's staging suffix is appended.
-8. Activate **Modd Hosting** under addon modules and restrict it to trusted
+9. Activate **Modd Hosting** under addon modules and restrict it to trusted
    administrator roles.
-9. Set a unique **Docker Hub Webhook Token**, then copy the webhook URL from
+10. Set a unique **Docker Hub Webhook Token**, then copy the webhook URL from
    the addon's **Docker images** page into the Docker Hub repository settings.
 
 The provisioning module creates, suspends, resumes, terminates, and displays

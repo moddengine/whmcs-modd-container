@@ -160,6 +160,11 @@ paths:
       summary: Resume a suspended or terminated service
       operationId: resumeService
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResumeRequest" }
       responses:
         "200": { $ref: "#/components/responses/ServiceStatus" }
         "202": { $ref: "#/components/responses/ServiceStatus" }
@@ -277,8 +282,20 @@ components:
         public_ipv4: { type: string, format: ipv4 }
         version: { type: string, minLength: 1 }
         display_name: { type: string }
+        package:
+          type: object
+          maxProperties: 20
+          additionalProperties: { type: string, maxLength: 250 }
         force_redeploy: { type: boolean, default: false }
       required: [main_domain, public_ipv4, version]
+    ResumeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        package:
+          type: object
+          maxProperties: 20
+          additionalProperties: { type: string, maxLength: 250 }
     UpgradeRequest:
       type: object
       additionalProperties: false
@@ -311,6 +328,12 @@ components:
         target_main_domain: { type: string, format: hostname }
         target_staging_domain: { type: string, format: hostname }
         target_public_ipv4: { type: string, format: ipv4 }
+        package:
+          type: object
+          additionalProperties: { type: string }
+        target_package:
+          type: object
+          additionalProperties: { type: string }
         dns_status: { type: string, enum: [pending, in_sync, error] }
         dns_last_error: { type: string }
         dns_synced_at: { type: string, format: date-time }

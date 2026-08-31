@@ -40,6 +40,7 @@ function moddhosting_CreateAccount(array $params): string
 			'public_ipv4' => trim((string) $params['serverip']),
             'version' => moddhosting_selected_version($params),
             'display_name' => 'WHMCS service ' . (int) $params['serviceid'],
+            'package' => moddhosting_package($params),
             'force_redeploy' => (bool) ($params['force_redeploy'] ?? false),
         ]);
     } catch (\Throwable $error) {
@@ -61,6 +62,13 @@ function moddhosting_deploy(array $params): string
 }
 
 /** @param array<string, mixed> $params */
+function moddhosting_ChangePackage(array $params): string
+{
+    $params['force_redeploy'] = true;
+    return moddhosting_CreateAccount($params);
+}
+
+/** @param array<string, mixed> $params */
 function moddhosting_reconnectDns(array $params): string
 {
     return moddhosting_call($params, 'POST', '/v1/services/' . moddhosting_service_id($params) . '/dns/reconnect');
@@ -75,7 +83,13 @@ function moddhosting_SuspendAccount(array $params): string
 /** @param array<string, mixed> $params */
 function moddhosting_UnsuspendAccount(array $params): string
 {
-    return moddhosting_call($params, 'POST', '/v1/services/' . moddhosting_service_id($params) . '/resume');
+    try {
+        return moddhosting_call($params, 'POST', '/v1/services/' . moddhosting_service_id($params) . '/resume', [
+            'package' => moddhosting_package($params),
+        ]);
+    } catch (\Throwable $error) {
+        return $error->getMessage();
+    }
 }
 
 /** @param array<string, mixed> $params */
@@ -341,6 +355,56 @@ function moddhosting_selected_staging(array $params, ?string $suffix = null): st
         throw new \InvalidArgumentException('Staging hostname must be a valid DNS label of at most 32 characters.');
     }
     return $staging . '.' . $suffix;
+}
+
+/**
+ * @param array<string, mixed> $params
+ * @return array<string, string>
+ */
+function moddhosting_package(array $params): array
+{
+    $model = $params['model'] ?? null;
+    $product = is_object($model) ? ($model->product ?? null) : null;
+    $group = is_object($product) ? ($product->productGroup ?? null) : null;
+    $activeSlug = is_object($product) ? ($product->activeSlug ?? null) : null;
+    $planSlug = is_object($activeSlug) ? trim((string) ($activeSlug->slug ?? '')) : '';
+    $planName = is_object($product) ? trim((string) ($product->name ?? '')) : '';
+    $groupSlug = is_object($group) ? trim((string) ($group->slug ?? '')) : '';
+    $groupName = is_object($group) ? trim((string) ($group->name ?? '')) : '';
+
+    $planSlug = $planSlug === '' ? 'Unknown' : $planSlug;
+    $planName = $planName === '' ? 'Unknown' : $planName;
+    $groupSlug = $groupSlug === '' ? 'Unknown' : $groupSlug;
+    $groupName = $groupName === '' ? 'Unknown' : $groupName;
+
+    $package = ['plan' => $planSlug . '|' . $planName, 'group' => $groupSlug . '|' . $groupName];
+    $optionValues = [];
+    $options = $params['configoptions'] ?? [];
+    if (!is_array($options)) {
+        throw new \InvalidArgumentException('WHMCS configurable options must be an array.');
+    }
+    foreach ($options as $code => $value) {
+        if (!is_string($code) || preg_match('/^[a-z][a-z0-9_]{0,62}$/D', $code) !== 1 || isset($package[$code])) {
+            throw new \InvalidArgumentException('Invalid or reserved configurable option code: ' . (string) $code);
+        }
+        if (!is_scalar($value) && $value !== null) {
+            throw new \InvalidArgumentException('Configurable option values must be scalar.');
+        }
+        $optionValues[$code] = (string) $value;
+    }
+    ksort($optionValues);
+    $optionLimit = 20 - count($package);
+    if (count($optionValues) > $optionLimit) {
+        $discardedCodes = array_keys(array_slice($optionValues, $optionLimit, null, true));
+        logModuleCall('moddhosting', 'package variables truncated', [
+            'service_id' => (int) ($params['serviceid'] ?? 0),
+            'attempted_count' => count($package) + count($optionValues),
+        ], ['discarded_codes' => $discardedCodes]);
+        $optionValues = array_slice($optionValues, 0, $optionLimit, true);
+    }
+    $package += $optionValues;
+    ksort($package);
+    return $package;
 }
 
 function moddhosting_valid_staging_label(string $label): bool

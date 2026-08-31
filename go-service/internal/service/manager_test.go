@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -225,6 +226,27 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 	service.Phase = "routing"
 	if _, err := validateUpgrade(service, model.UpgradeRequest{Version: "v3"}, false); err == nil {
 		t.Fatal("upgrade was superseded after routing started")
+	}
+}
+
+func TestNormalizePackage(t *testing.T) {
+	got, err := normalizePackage(map[string]string{"plan": "small|Small Hosting Plan", "email_sends": "500"})
+	if err != nil || got["plan"] != "small|Small Hosting Plan" || got["email_sends"] != "500" {
+		t.Fatalf("normalizePackage() = %#v, %v", got, err)
+	}
+	tooMany := make(map[string]string, maxPackageVariables+1)
+	for i := range maxPackageVariables + 1 {
+		tooMany[fmt.Sprintf("value_%d", i)] = "x"
+	}
+	for _, values := range []map[string]string{
+		{"Bad Code": "x"},
+		{"valid": "bad\x00value"},
+		{"valid": strings.Repeat("x", maxPackageValueChars+1)},
+		tooMany,
+	} {
+		if _, err := normalizePackage(values); err == nil {
+			t.Fatalf("normalizePackage(%#v) accepted invalid input", values)
+		}
 	}
 }
 
@@ -479,6 +501,39 @@ func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
 		}
 	}
 	t.Fatal("initial asynchronous DNS result was not recorded")
+}
+
+func TestResumeHealthSwitchesToOppositeSlot(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "green.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })}
+	go server.Serve(listener)
+	t.Cleanup(func() { _ = server.Close() })
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{
+		ID: "whmcs-123", State: model.Suspended, Phase: "waiting_for_health", Operation: "resume", LiveDeploy: "blue", TargetDeploy: "green", Version: "v1", TargetVersion: "v1",
+		MainDomain: "example.com", StagingDomain: "example.staging.test", Package: map[string]string{"plan": "old"}, TargetPackage: map[string]string{"plan": "new"},
+		Deploy: map[string]model.Deploy{"blue": {Health: "unknown"}, "green": {Socket: socket, Version: "v1", Health: "checking"}},
+	}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{
+		Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, healthAttempts: map[string]uint64{service.ID: 1},
+		Caddy: caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+	}
+	manager.finishHealth(service, "resume", "request-1", 1)
+	got, err := repo.Get(service.ID)
+	if err != nil || got.State != model.Active || got.Phase != "running" || got.LiveDeploy != "green" || got.Package["plan"] != "new" || got.TargetPackage != nil {
+		t.Fatalf("resumed service = %#v, %v", got, err)
+	}
 }
 
 func TestSupersededHealthResultIsIgnored(t *testing.T) {

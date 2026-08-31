@@ -10,12 +10,17 @@ const (
 )
 
 type ProvisionRequest struct {
-	MainDomain    string `json:"main_domain"`
-	StagingDomain string `json:"staging_domain,omitempty"`
-	PublicIPv4    string `json:"public_ipv4"`
-	Version       string `json:"version"`
-	DisplayName   string `json:"display_name,omitempty"`
-	ForceRedeploy bool   `json:"force_redeploy,omitempty"`
+	MainDomain    string            `json:"main_domain"`
+	StagingDomain string            `json:"staging_domain,omitempty"`
+	PublicIPv4    string            `json:"public_ipv4"`
+	Version       string            `json:"version"`
+	DisplayName   string            `json:"display_name,omitempty"`
+	Package       map[string]string `json:"package,omitempty"`
+	ForceRedeploy bool              `json:"force_redeploy,omitempty"`
+}
+
+type ResumeRequest struct {
+	Package map[string]string `json:"package,omitempty"`
 }
 
 type UpgradeRequest struct {
@@ -39,6 +44,8 @@ type Service struct {
 	TargetMainDomain    string            `toml:"target_main_domain,omitempty" json:"target_main_domain,omitempty"`
 	TargetStagingDomain string            `toml:"target_staging_domain,omitempty" json:"target_staging_domain,omitempty"`
 	TargetPublicIPv4    string            `toml:"target_public_ipv4,omitempty" json:"target_public_ipv4,omitempty"`
+	Package             map[string]string `toml:"package,omitempty" json:"package,omitempty"`
+	TargetPackage       map[string]string `toml:"target_package,omitempty" json:"target_package,omitempty"`
 	CreatedAt           time.Time         `toml:"created_at" json:"created_at"`
 	UpdatedAt           time.Time         `toml:"updated_at" json:"updated_at"`
 	LastError           string            `toml:"last_error,omitempty" json:"last_error,omitempty"`
