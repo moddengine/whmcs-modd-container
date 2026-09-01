@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -311,8 +312,10 @@ func TestDNSFailureDoesNotChangeRunningWorkload(t *testing.T) {
 	if err := repo.Put(service); err != nil {
 		t.Fatal(err)
 	}
+	var logs bytes.Buffer
 	manager := Manager{
 		Repo: repo, dnsBackoffs: []time.Duration{0},
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 500, Status: "500 Internal Server Error", Body: io.NopCloser(bytes.NewReader(nil))}, nil
@@ -322,6 +325,9 @@ func TestDNSFailureDoesNotChangeRunningWorkload(t *testing.T) {
 	got, err := repo.Get(service.ID)
 	if err != nil || got.DNSStatus != "error" || got.DNSLastError == "" || got.State != model.Active || got.Phase != "running" {
 		t.Fatalf("service after DNS failure = %#v, %v", got, err)
+	}
+	if !strings.Contains(logs.String(), `"level":"ERROR"`) || !strings.Contains(logs.String(), `"attempt":1`) {
+		t.Fatalf("exhausted DNS log = %q", logs.String())
 	}
 	got.DNSStatus = "pending"
 	if err := repo.Put(got); err != nil {
@@ -350,8 +356,10 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
+	var logs bytes.Buffer
 	manager := Manager{
 		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0, 0, 0},
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			status := 500
@@ -377,6 +385,9 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	}
 	if !synced {
 		t.Fatal("asynchronous DNS result was not persisted")
+	}
+	if got := strings.Count(logs.String(), `"msg":"DNS update attempt failed"`); got != 2 || !strings.Contains(logs.String(), `"attempt":2`) || !strings.Contains(logs.String(), `"retry_in":"0s"`) {
+		t.Fatalf("DNS retry logs = %q", logs.String())
 	}
 	latest, _ := repo.Get(service.ID)
 	if _, err := manager.queueDNS(latest); err != nil {

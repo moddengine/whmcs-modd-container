@@ -1070,7 +1070,7 @@ func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 		backoffs = []time.Duration{0, 30 * time.Second, 5 * time.Minute}
 	}
 	var err error
-	for _, backoff := range backoffs {
+	for attempt, backoff := range backoffs {
 		if err = ctx.Err(); err != nil {
 			return
 		}
@@ -1086,11 +1086,22 @@ func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 		if ctx.Err() != nil {
 			return
 		}
+		if m.Logger != nil {
+			args := []any{"service_id", id, "domain", domain, "attempt", attempt + 1, "max_attempts", len(backoffs), "error", err}
+			if attempt+1 < len(backoffs) {
+				m.Logger.Warn("DNS update attempt failed", append(args, "retry_in", backoffs[attempt+1].String())...)
+			} else {
+				m.Logger.Error("DNS update attempt failed", args...)
+			}
+		}
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	service, getErr := m.Repo.Get(id)
+	if getErr != nil && m.Logger != nil {
+		m.Logger.Error("load service after DNS update", "service_id", id, "error", getErr)
+	}
 	if getErr != nil || service.MainDomain != domain || service.PublicIPv4 != publicIPv4 || err != nil && service.DNSStatus != "pending" {
 		return
 	}
