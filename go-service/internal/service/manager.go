@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,7 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
-	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -67,10 +66,12 @@ type Manager struct {
 	Notify       notify.Notifier
 	Logger       *slog.Logger
 	Certificates *certificate.Issuer
+	DNSKey       string
 	// ponytail: serialize lifecycle writes; switch to per-service locks only if parallel upgrades are needed.
 	mu                       sync.Mutex
 	healthAttempts           map[string]uint64
 	dnsBackoffs              []time.Duration
+	dnsTimeout               time.Duration
 	dnsHTTPClient            *http.Client
 	dnsWake                  chan struct{}
 	dnsPending               map[string]dnsUpdate
@@ -81,6 +82,17 @@ type Manager struct {
 type dnsUpdate struct {
 	id, domain, publicIPv4 string
 }
+
+type dnsRequestError struct {
+	method, fqdn, recordType string
+	err                      error
+}
+
+func (e *dnsRequestError) Error() string {
+	return fmt.Sprintf("%s %s %s: %v", e.method, e.fqdn, e.recordType, e.err)
+}
+
+func (e *dnsRequestError) Unwrap() error { return e.err }
 
 func ValidateServiceID(id string) error {
 	if !serviceIDPattern.MatchString(id) {
@@ -987,7 +999,7 @@ func (m *Manager) ReconnectDNS(id string) error {
 	return nil
 }
 
-func (m *Manager) dnsEnabled() bool { return m.Config.DNSWebhook.URL != "" }
+func (m *Manager) dnsEnabled() bool { return m.Config.DNS.Endpoint != "" }
 
 func (m *Manager) StartDNSWorker() {
 	if !m.dnsEnabled() {
@@ -1079,7 +1091,7 @@ func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 				return
 			}
 		}
-		err = m.callDNSWebhook(ctx, domain, publicIPv4)
+		err = m.callDNSAPI(ctx, domain, publicIPv4)
 		if err == nil {
 			break
 		}
@@ -1088,6 +1100,10 @@ func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 		}
 		if m.Logger != nil {
 			args := []any{"service_id", id, "domain", domain, "attempt", attempt + 1, "max_attempts", len(backoffs), "error", err}
+			var requestErr *dnsRequestError
+			if errors.As(err, &requestErr) {
+				args = append(args, "method", requestErr.method, "fqdn", requestErr.fqdn, "record_type", requestErr.recordType)
+			}
 			if attempt+1 < len(backoffs) {
 				m.Logger.Warn("DNS update attempt failed", append(args, "retry_in", backoffs[attempt+1].String())...)
 			} else {
@@ -1116,26 +1132,52 @@ func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 	}
 }
 
-func (m *Manager) callDNSWebhook(parent context.Context, domain, publicIPv4 string) error {
-	rendered := strings.NewReplacer("{domain}", jsonString(domain), "{ipv4}", jsonString(publicIPv4)).Replace(m.Config.DNSWebhook.Body)
-	headerBlock, body, ok := strings.Cut(strings.ReplaceAll(rendered, "\r\n", "\n"), "\n\n")
-	if !ok {
-		return errors.New("dns_webhook.body must separate headers and content with a blank line")
+func (m *Manager) callDNSAPI(parent context.Context, domain, publicIPv4 string) error {
+	timeout := m.dnsTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
 	}
-	headers, err := textproto.NewReader(bufio.NewReader(strings.NewReader(headerBlock + "\n\n"))).ReadMIMEHeader()
-	if err != nil {
-		return fmt.Errorf("parse dns_webhook.body headers: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(parent, m.Config.DNSWebhook.Timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.Config.DNSWebhook.URL, bytes.NewBufferString(body))
+	requests := []struct {
+		method, fqdn, recordType, value string
+	}{
+		{http.MethodPut, domain, "A", publicIPv4},
+		{http.MethodDelete, domain, "AAAA", ""},
+		{http.MethodDelete, "www." + domain, "A", ""},
+		{http.MethodDelete, "www." + domain, "AAAA", ""},
+		{http.MethodPut, "www." + domain, "CNAME", domain},
+	}
+	for _, request := range requests {
+		if err := m.callDNSRecord(ctx, request.method, request.fqdn, request.recordType, request.value); err != nil {
+			return &dnsRequestError{request.method, request.fqdn, request.recordType, err}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) callDNSRecord(ctx context.Context, method, fqdn, recordType, value string) error {
+	endpoint, err := url.JoinPath(m.Config.DNS.Endpoint, "record", fqdn, recordType)
 	if err != nil {
 		return err
 	}
-	for name, values := range headers {
-		for _, value := range values {
-			req.Header.Add(name, value)
+	var body io.Reader
+	if value != "" {
+		encoded, err := json.Marshal(struct {
+			Values []string `json:"values"`
+		}{[]string{value}})
+		if err != nil {
+			return err
 		}
+		body = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Auth-Key", m.DNSKey)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	client := m.dnsHTTPClient
 	if client == nil {
@@ -1148,14 +1190,9 @@ func (m *Manager) callDNSWebhook(parent context.Context, domain, publicIPv4 stri
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("DNS webhook returned %s", response.Status)
+		return fmt.Errorf("WHMCS DNS API returned %s", response.Status)
 	}
 	return nil
-}
-
-func jsonString(value string) string {
-	encoded, _ := json.Marshal(value)
-	return string(encoded[1 : len(encoded)-1])
 }
 
 func (m *Manager) RecoverInterrupted() error {

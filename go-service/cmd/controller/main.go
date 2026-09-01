@@ -45,8 +45,11 @@ func main() {
 		fatal(fmt.Errorf("read bearer token: %w", err))
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	if cfg.DNSWebhook.URL == "" {
-		logger.Info("DNS update disabled; dns_webhook.url is empty")
+	dnsKey := ""
+	if cfg.DNS.Endpoint == "" {
+		logger.Info("DNS update disabled; dns.endpoint is empty")
+	} else if dnsKey, err = config.ReadSecret(cfg.DNS.KeyFile); err != nil {
+		fatal(fmt.Errorf("read WHMCS DNS API key: %w", err))
 	}
 	issuer, err := certificate.Load(cfg.Certificates)
 	if err != nil {
@@ -101,6 +104,7 @@ func main() {
 			InitialDelay: cfg.Deployment.HealthInitialDelay, Backoff: cfg.Deployment.HealthBackoff,
 		},
 		Metrics: metrics.Mock{}, Notify: notifier, Logger: logger, Certificates: issuer,
+		DNSKey: dnsKey,
 	}
 	controllerContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

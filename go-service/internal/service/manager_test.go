@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -265,24 +266,55 @@ func TestProvisionRejectsInvalidPublicIPv4(t *testing.T) {
 	}
 }
 
-func TestDNSWebhookRendersJSONEscapedValues(t *testing.T) {
-	var gotBody, gotAuthorization string
+func testDNSConfig() config.Config {
+	return config.Config{DNS: config.DNS{Endpoint: "https://dns.example/modules/addons/whmcs_dns/dns.php", KeyFile: "/run/dns-key"}}
+}
+
+func TestDNSAPIWritesWebsiteRecords(t *testing.T) {
+	type capturedRequest struct{ method, path, body, key string }
+	var requests []capturedRequest
 	manager := Manager{
-		Config: config.Config{DNSWebhook: config.DNSWebhook{
-			URL: "https://dns.example/hook", Timeout: time.Second,
-			Body: "Authorization: Bearer token\nContent-Type: application/json\n\n{\"domain\":\"{domain}\",\"ipv4\":\"{ipv4}\"}",
-		}},
+		Config: testDNSConfig(), DNSKey: "secret",
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			body, _ := io.ReadAll(request.Body)
-			gotBody, gotAuthorization = string(body), request.Header.Get("Authorization")
+			var body []byte
+			if request.Body != nil {
+				body, _ = io.ReadAll(request.Body)
+			}
+			requests = append(requests, capturedRequest{request.Method, request.URL.Path, string(body), request.Header.Get("Auth-Key")})
 			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
 		})},
 	}
-	if err := manager.callDNSWebhook(t.Context(), "quote\".example", "line\nfeed"); err != nil {
+	if err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10"); err != nil {
 		t.Fatal(err)
 	}
-	if gotAuthorization != "Bearer token" || gotBody != `{"domain":"quote\".example","ipv4":"line\nfeed"}` {
-		t.Fatalf("headers/body = %q / %q", gotAuthorization, gotBody)
+	want := []capturedRequest{
+		{http.MethodPut, "/modules/addons/whmcs_dns/dns.php/record/example.com/A", `{"values":["203.0.113.10"]}`, "secret"},
+		{http.MethodDelete, "/modules/addons/whmcs_dns/dns.php/record/example.com/AAAA", "", "secret"},
+		{http.MethodDelete, "/modules/addons/whmcs_dns/dns.php/record/www.example.com/A", "", "secret"},
+		{http.MethodDelete, "/modules/addons/whmcs_dns/dns.php/record/www.example.com/AAAA", "", "secret"},
+		{http.MethodPut, "/modules/addons/whmcs_dns/dns.php/record/www.example.com/CNAME", `{"values":["example.com"]}`, "secret"},
+	}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("DNS requests = %#v, want %#v", requests, want)
+	}
+}
+
+func TestDNSAPIFailureStopsSequence(t *testing.T) {
+	var calls int
+	manager := Manager{
+		Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			status := http.StatusNoContent
+			if calls == 3 {
+				status = http.StatusInternalServerError
+			}
+			return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		})},
+	}
+	err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10")
+	if calls != 3 || err == nil || !strings.Contains(err.Error(), "DELETE www.example.com A") {
+		t.Fatalf("calls/error = %d / %v", calls, err)
 	}
 }
 
@@ -316,7 +348,7 @@ func TestDNSFailureDoesNotChangeRunningWorkload(t *testing.T) {
 	manager := Manager{
 		Repo: repo, dnsBackoffs: []time.Duration{0},
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
-		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		Config: testDNSConfig(), DNSKey: "secret",
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 500, Status: "500 Internal Server Error", Body: io.NopCloser(bytes.NewReader(nil))}, nil
 		})},
@@ -326,14 +358,14 @@ func TestDNSFailureDoesNotChangeRunningWorkload(t *testing.T) {
 	if err != nil || got.DNSStatus != "error" || got.DNSLastError == "" || got.State != model.Active || got.Phase != "running" {
 		t.Fatalf("service after DNS failure = %#v, %v", got, err)
 	}
-	if !strings.Contains(logs.String(), `"level":"ERROR"`) || !strings.Contains(logs.String(), `"attempt":1`) {
+	if !strings.Contains(logs.String(), `"level":"ERROR"`) || !strings.Contains(logs.String(), `"attempt":1`) || !strings.Contains(logs.String(), `"method":"PUT"`) || !strings.Contains(logs.String(), `"record_type":"A"`) {
 		t.Fatalf("exhausted DNS log = %q", logs.String())
 	}
 	got.DNSStatus = "pending"
 	if err := repo.Put(got); err != nil {
 		t.Fatal(err)
 	}
-	manager.Config.DNSWebhook.Timeout = time.Millisecond
+	manager.dnsTimeout = time.Millisecond
 	manager.dnsHTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		<-request.Context().Done()
 		return nil, request.Context().Err()
@@ -360,7 +392,7 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	manager := Manager{
 		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0, 0, 0},
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
-		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		Config: testDNSConfig(), DNSKey: "secret",
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			status := 500
 			if calls.Add(1) >= 3 {
@@ -376,7 +408,7 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 		got, _ := repo.Get(service.ID)
 		if got.DNSStatus == "in_sync" {
-			if calls.Load() != 3 || got.DNSSyncedAt == "" {
+			if calls.Load() != 7 || got.DNSSyncedAt == "" {
 				t.Fatalf("calls/status = %d / %#v", calls.Load(), got)
 			}
 			synced = true
@@ -395,11 +427,11 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	}
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 		latest, _ = repo.Get(service.ID)
-		if calls.Load() == 4 && latest.DNSStatus == "in_sync" {
+		if calls.Load() == 12 && latest.DNSStatus == "in_sync" {
 			break
 		}
 	}
-	if calls.Load() != 4 || latest.DNSStatus != "in_sync" {
+	if calls.Load() != 12 || latest.DNSStatus != "in_sync" {
 		t.Fatalf("successful DNS deployment was not safely repeated: calls=%d service=%#v", calls.Load(), latest)
 	}
 }
@@ -418,11 +450,13 @@ func TestReconnectDNSCoalescesRepeatedRequests(t *testing.T) {
 	var calls atomic.Int32
 	manager := Manager{
 		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0},
-		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
-		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			calls.Add(1)
-			started <- struct{}{}
-			<-release
+		Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/record/example.com/A") {
+				calls.Add(1)
+				started <- struct{}{}
+				<-release
+			}
 			return &http.Response{StatusCode: http.StatusNoContent, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
 		})},
 	}
@@ -467,11 +501,11 @@ func TestDNSWorkerIsSerialAndKeepsLatestQueuedValue(t *testing.T) {
 	var calls, active, maximum atomic.Int32
 	manager := Manager{
 		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0},
-		Config: config.Config{DNSWebhook: config.DNSWebhook{
-			URL: "https://dns.example/hook", Timeout: time.Second,
-			Body: "Content-Type: application/json\n\n{\"domain\":\"{domain}\",\"ipv4\":\"{ipv4}\"}",
-		}},
+		Config: testDNSConfig(), DNSKey: "secret",
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodPut || !strings.HasSuffix(request.URL.Path, "/A") {
+				return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+			}
 			current := active.Add(1)
 			for previous := maximum.Load(); current > previous && !maximum.CompareAndSwap(previous, current); previous = maximum.Load() {
 			}
@@ -494,7 +528,7 @@ func TestDNSWorkerIsSerialAndKeepsLatestQueuedValue(t *testing.T) {
 	<-started
 
 	firstBody, secondBody := <-bodies, <-bodies
-	if maximum.Load() != 1 || !strings.Contains(firstBody, first.MainDomain) || !strings.Contains(secondBody, second.MainDomain) || strings.Contains(secondBody, "obsolete") {
+	if maximum.Load() != 1 || !strings.Contains(firstBody, first.PublicIPv4) || !strings.Contains(secondBody, second.PublicIPv4) || strings.Contains(secondBody, "203.0.113.2") {
 		t.Fatalf("DNS worker concurrency=%d, bodies=%q / %q", maximum.Load(), firstBody, secondBody)
 	}
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
@@ -520,7 +554,7 @@ func TestDNSWorkerCancellationInterruptsBackoff(t *testing.T) {
 	called := make(chan struct{}, 1)
 	manager := Manager{
 		Context: ctx, Repo: repo, dnsBackoffs: []time.Duration{0, time.Hour},
-		Config: config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		Config: testDNSConfig(), DNSKey: "secret",
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			called <- struct{}{}
 			return &http.Response{StatusCode: 500, Status: "500 Internal Server Error", Body: io.NopCloser(bytes.NewReader(nil))}, nil
@@ -556,7 +590,7 @@ func TestReconnectDNSRejectsDisabledAndMissingServices(t *testing.T) {
 	}{{"whmcs-123", http.StatusConflict}, {"whmcs-999", http.StatusNotFound}} {
 		id, wantStatus := test.id, test.wantStatus
 		if id == "whmcs-999" {
-			manager.Config.DNSWebhook.URL = "https://dns.example/hook"
+			manager.Config = testDNSConfig()
 		}
 		err := manager.ReconnectDNS(id)
 		var apiErr *Error
@@ -590,8 +624,8 @@ func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
 	}
 	manager := Manager{
 		Context: t.Context(), Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, dnsBackoffs: []time.Duration{0},
-		Caddy:          caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
-		Config:         config.Config{DNSWebhook: config.DNSWebhook{URL: "https://dns.example/hook", Timeout: time.Second, Body: "Content-Type: application/json\n\n{}"}},
+		Caddy:  caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+		Config: testDNSConfig(), DNSKey: "secret",
 		healthAttempts: map[string]uint64{service.ID: 1},
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil

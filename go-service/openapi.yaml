@@ -181,7 +181,7 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
   /v1/services/{id}/dns/reconnect:
     post:
-      summary: Queue a DNS webhook update
+      summary: Queue a WHMCS DNS update
       description: Requeues the service's current main domain and public IPv4 even when its DNS status is already pending or in sync.
       operationId: reconnectServiceDNS
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]

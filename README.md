@@ -208,17 +208,18 @@ before changing mounts.
 | `deployment.traffic_drain` | Wait before removing the old deployment. |
 | `deployment.socket` | Host, container, and Caddy-visible Unix-socket path template; supports `{service_id}` and `{slot}`. |
 | `domains.staging_suffix` | Suffix appended to staging labels supplied by WHMCS. |
-| `dns_webhook.url` | DNS update endpoint; omit or leave empty to disable updates. |
-| `dns_webhook.body` | HTTP headers, a blank line, and body template supporting `{domain}` and `{ipv4}`. |
-| `dns_webhook.timeout` | Timeout for each DNS update attempt. |
+| `dns.endpoint` | WHMCS DNS API base ending in `dns.php`; omit the section to disable updates. |
+| `dns.key_file` | File containing a WHMCS DNS API key with `dns_write` access. |
 
 For example, staging label `preview` with suffix `staging.com` becomes
 `preview.staging.com`. A deployment is routed only after the health endpoint
 returns HTTP 2xx. Failed provision and upgrade artifacts remain in place for
 diagnosis.
 
-DNS updates run after healthy routing without blocking the site. Failures are
-recorded in service status and retried twice after 30 seconds and 5 minutes.
+DNS updates set the domain A record, remove its AAAA record, and replace the
+`www` A/AAAA records with a CNAME to the domain. They run after healthy routing
+without blocking the site. Failures are logged, recorded in service status,
+and retried twice after 30 seconds and 5 minutes.
 Administrators can queue the current domain and IPv4 again with
 `POST /v1/services/{id}/dns/reconnect`.
 
@@ -285,5 +286,18 @@ composer analyse
 ```
 
 The API contract is [go-service/openapi.yaml](go-service/openapi.yaml).
+
+## Release
+
+Commit the release changes, create a new semantic-version tag, then push
+`main` and that tag (replace `vN.N.N` with the release version):
+
+```sh
+git add -A
+git commit -m "Release vN.N.N"
+git tag vN.N.N
+git push origin main vN.N.N
+```
+
 Tagged pushes matching `v*` build and publish the controller and WHMCS ZIP as
 GitHub release assets.

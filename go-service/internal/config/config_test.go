@@ -15,7 +15,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if config.Server.Listen != "127.0.0.1:8443" ||
 		config.Deployment.TrafficDrain != 10*time.Second ||
-		config.Deployment.HealthAttempts != 30 || config.DNSWebhook.Timeout != 30*time.Second || config.Docker.PullTimeout != 30*time.Minute ||
+		config.Deployment.HealthAttempts != 30 || config.DNS.Endpoint == "" || config.Docker.PullTimeout != 30*time.Minute ||
 		config.Docker.CertificateMountPath != "/srv/modd/secrets" {
 		t.Fatalf("unexpected example config: %#v", config)
 	}
@@ -51,19 +51,37 @@ func TestDockerPullTimeoutMustBePositive(t *testing.T) {
 	}
 }
 
-func TestDNSWebhookCanBeDisabledByOmittingURL(t *testing.T) {
+func TestDNSCanBeDisabledByOmittingSection(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join("..", "..", "config.example.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	start, end := strings.Index(string(content), "[dns_webhook]"), strings.Index(string(content), "[google_chat]")
+	start, end := strings.Index(string(content), "[dns]"), strings.Index(string(content), "[google_chat]")
 	path := filepath.Join(t.TempDir(), "controller.toml")
 	if err := os.WriteFile(path, append(content[:start], content[end:]...), 0600); err != nil {
 		t.Fatal(err)
 	}
 	config, err := Load(path)
-	if err != nil || config.DNSWebhook.URL != "" {
-		t.Fatalf("disabled DNS config = %#v, %v", config.DNSWebhook, err)
+	if err != nil || config.DNS.Endpoint != "" {
+		t.Fatalf("disabled DNS config = %#v, %v", config.DNS, err)
+	}
+}
+
+func TestDNSConfigValidation(t *testing.T) {
+	config, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, dns := range map[string]DNS{
+		"missing key":      {Endpoint: "https://dns.example/dns.php"},
+		"missing endpoint": {KeyFile: "/run/dns-key"},
+		"invalid endpoint": {Endpoint: "file:///dns.php", KeyFile: "/run/dns-key"},
+		"relative key":     {Endpoint: "https://dns.example/dns.php", KeyFile: "dns-key"},
+	} {
+		config.DNS = dns
+		if err := config.Validate(); err == nil {
+			t.Errorf("%s DNS config was accepted", name)
+		}
 	}
 }
 
