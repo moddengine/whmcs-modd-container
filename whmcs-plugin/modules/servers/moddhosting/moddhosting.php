@@ -163,7 +163,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
         };
         $dnsSyncedAt = (string) ($status['dns_synced_at'] ?? '');
         return [
-            'Image Version' => '<select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
+            'Image Version' => '<input type="hidden" name="moddhosting_fields" value="1"><select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
             'Staging Hostname' => '<div class="input-group" style="max-width:500px"><input type="text" name="modulefields[1]" class="form-control" maxlength="32" value="'
                 . moddhosting_escape($stagingLabel) . '" placeholder="Blank to disable staging"><span class="input-group-addon">.'
                 . moddhosting_escape($stagingSuffix) . '</span></div>',
@@ -190,6 +190,9 @@ function moddhosting_AdminServicesTabFields(array $params): array
 /** @param array<string, mixed> $params */
 function moddhosting_AdminServicesTabFieldsSave(array $params): void
 {
+    if (($_POST['moddhosting_fields'] ?? '') !== '1') {
+        return;
+    }
     $fields = $_POST['modulefields'] ?? [];
     $version = is_array($fields) ? trim((string) ($fields[0] ?? '')) : '';
     if (!in_array($version, array_column(moddhosting_versions($params), 'version'), true)) {

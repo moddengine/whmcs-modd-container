@@ -13,6 +13,10 @@ function logModuleCall(string $module, string $action, mixed $request, mixed $re
 
 require_once dirname(__DIR__) . '/modules/servers/moddhosting/moddhosting.php';
 
+$_POST['modulefields'] = ['another-module-value'];
+moddhosting_AdminServicesTabFieldsSave([]);
+unset($_POST['modulefields']);
+
 assert(moddhosting_ConfigOptions() === []);
 assert(moddhosting_valid_staging_label(str_repeat('a', 32)));
 assert(!moddhosting_valid_staging_label(str_repeat('a', 33)));
