@@ -316,14 +316,16 @@ func TestDNSAPIFailureStopsSequence(t *testing.T) {
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			calls++
 			status := http.StatusNoContent
+			body := ""
 			if calls == 3 {
 				status = http.StatusInternalServerError
+				body = `{"error":"provider_error","message":"Unable to update DNS provider."}`
 			}
-			return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(bytes.NewReader(nil))}, nil
+			return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader(body))}, nil
 		})},
 	}
 	err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10")
-	if calls != 3 || err == nil || !strings.Contains(err.Error(), "DELETE www.example.com A") {
+	if calls != 3 || err == nil || !strings.Contains(err.Error(), `DELETE www.example.com A: WHMCS DNS API returned Internal Server Error: {"error":"provider_error"`) {
 		t.Fatalf("calls/error = %d / %v", calls, err)
 	}
 }

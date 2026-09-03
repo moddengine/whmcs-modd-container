@@ -1189,8 +1189,11 @@ func (m *Manager) callDNSRecord(ctx context.Context, method, fqdn, recordType, v
 		return err
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if detail := strings.TrimSpace(string(responseBody)); detail != "" {
+			return fmt.Errorf("WHMCS DNS API returned %s: %s", response.Status, detail)
+		}
 		return fmt.Errorf("WHMCS DNS API returned %s", response.Status)
 	}
 	return nil
