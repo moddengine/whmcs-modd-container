@@ -204,14 +204,14 @@ func TestSortVersionsNewestFirst(t *testing.T) {
 
 func TestContainerSpec(t *testing.T) {
 	service := model.Service{
-		ID: "whmcs-123", MainDomain: "example.com", Version: "v21.6.24",
+		ID: "whmcs-123", MainDomain: "example.com", Version: "v26.1.15",
 		Package: map[string]string{"plan": "small|Small Hosting Plan", "email_sends": "500", "group": "website-hosting|Website Hosting"},
 		Dataset: model.DatasetRecord{Mountpoint: "/modd/sites/whmcs-123"},
 		Deploy:  map[string]model.Deploy{"blue": {Socket: "/run/whmcs/whmcs-123-blue/http.sock"}},
 	}
 	cfg := config.Docker{
 		Network: "udo-net", ImageRepository: "whmcs-runtime",
-		Binds:                []string{"{mountpoint}/{slot}/cache:/cache"},
+		Binds:                []string{"{mountpoint}/{slot}/cache:/cache", "/modd/host/caddy/http/{service_id}-{slot}:{socket_path}"},
 		Environment:          []string{"SERVICE={service_id}", "DATA={mountpoint}", "DEPLOY={slot}"},
 		CertificateMountPath: "/srv/modd/secrets",
 	}
@@ -219,7 +219,7 @@ func TestContainerSpec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Image != "whmcs-runtime:v21.6.24" ||
+	if spec.Image != "whmcs-runtime:v26.1.15" ||
 		spec.User != "10123:10123" ||
 		spec.Labels[serviceLabel] != "whmcs-123" ||
 		spec.Labels[appLabel] != "whmcs" ||
@@ -243,6 +243,7 @@ func TestContainerSpec(t *testing.T) {
 	}
 	if !slices.Equal(host.Binds, []string{
 		"/modd/sites/whmcs-123/blue/cache:/cache",
+		"/modd/host/caddy/http/whmcs-123-blue:/run/moddengine",
 		"/modd/sites/whmcs-123/secrets:/srv/modd/secrets:ro",
 		"/run/whmcs/whmcs-123-blue:/run/whmcs/whmcs-123-blue",
 	}) {
@@ -253,6 +254,44 @@ func TestContainerSpec(t *testing.T) {
 	}
 	if host.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
 		t.Fatalf("unexpected restart policy: %q", host.RestartPolicy.Name)
+	}
+}
+
+func TestSocketLayout(t *testing.T) {
+	tests := []struct {
+		version, path, name string
+	}{
+		{"v26.0.52", "/run/nginx", "nginx.sock"},
+		{"v26.1.14", "/run/nginx", "nginx.sock"},
+		{"v26.1.15", "/run/moddengine", "http.sock"},
+		{"v26.2.0", "/run/moddengine", "http.sock"},
+		{"v26.6.10", "/run/moddengine", "http.sock"},
+		{"pr-123", "/run/moddengine", "http.sock"},
+	}
+	for _, test := range tests {
+		path, name := SocketLayout(test.version)
+		if path != test.path || name != test.name {
+			t.Errorf("SocketLayout(%q) = %q, %q; want %q, %q", test.version, path, name, test.path, test.name)
+		}
+	}
+}
+
+func TestLegacySocketPathBind(t *testing.T) {
+	service := model.Service{
+		ID: "whmcs-123", Version: "v26.1.14",
+		Dataset: model.DatasetRecord{Mountpoint: "/modd/sites/whmcs-123"},
+		Deploy:  map[string]model.Deploy{"blue": {Socket: "/modd/host/caddy/http/whmcs-123-blue/nginx.sock"}},
+	}
+	cfg := config.Docker{
+		Network: "udo-net", ImageRepository: "whmcs-runtime", CertificateMountPath: "/srv/modd/secrets",
+		Binds: []string{"/modd/host/caddy/http/{service_id}-{slot}:{socket_path}"},
+	}
+	_, host, _, err := ContainerSpec(cfg, service, "blue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(host.Binds, "/modd/host/caddy/http/whmcs-123-blue:/run/nginx") {
+		t.Fatalf("legacy socket bind missing: %#v", host.Binds)
 	}
 }
 

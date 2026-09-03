@@ -63,14 +63,17 @@ Every container has:
   `au.modd.app`, and `au.modd.deploy`;
 - `ME_SITE=<service-id>`, `ME_INSTANCE=<service-id>-<slot>`, configured
   environment entries, and the service's sorted `ME_PACKAGE_*` entries;
-- configured bind mounts with `{mountpoint}`, `{service_id}`, and `{slot}`
-  expanded; and
+- configured bind mounts with `{mountpoint}`, `{service_id}`, `{slot}`, and
+  `{socket_path}` expanded; and
 - the slot socket directory mounted at the identical host/container path.
 
 The image must support an arbitrary non-root UID/GID, write only to writable
-binds and its socket directory, create `http.sock`, and answer the configured
-health path over that socket. Add a MySQL socket bind only if the image needs
-one.
+binds and its socket directory, and answer the configured health path over its
+socket. For versions through `v26.1.14`, `{socket_path}` is `/run/nginx` and
+the socket is `nginx.sock`; for newer and non-numeric versions it is
+`/run/moddengine` and the socket is `http.sock`. Caddy templates can use
+`{socket_name}` to select the same filename. Add a MySQL socket bind only if
+the image needs one.
 
 Containers use Docker's `unless-stopped` restart policy and join the configured
 existing network. Before creation, the controller creates missing bind-source

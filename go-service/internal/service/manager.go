@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -384,7 +383,9 @@ func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDoma
 		publicIPv4 = requestedIPv4[0]
 	}
 	oldDomains := domains(service)
-	apply := m.Caddy.Active
+	apply := func(ctx context.Context, id string, domains []string, slot string) error {
+		return m.Caddy.Active(ctx, id, domains, slot, deploymentSocketName(service, slot))
+	}
 	if service.State == model.Suspended && service.Phase == "stopped" {
 		apply = func(ctx context.Context, id string, domains []string, _ string) error {
 			return m.Caddy.Suspended(ctx, id, domains)
@@ -739,8 +740,8 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		m.failSync(service, requestID, err)
 		return nil, false, internal(err)
 	}
-	if !configured || mode != "proxy" || socket != m.Caddy.Socket(id, service.LiveDeploy) {
-		if err := m.Caddy.Active(ctx, id, domains(service), service.LiveDeploy); err != nil {
+	if !configured || mode != "proxy" || socket != m.Caddy.Socket(id, service.LiveDeploy, deploymentSocketName(service, service.LiveDeploy)) {
+		if err := m.Caddy.Active(ctx, id, domains(service), service.LiveDeploy, deploymentSocketName(service, service.LiveDeploy)); err != nil {
 			m.failSync(service, requestID, err)
 			return nil, false, internal(fmt.Errorf("restore Caddy live deployment: %w", err))
 		}
@@ -787,7 +788,7 @@ func validateUpgrade(service model.Service, req model.UpgradeRequest, forceRedep
 	if req.Version == service.Version && !forceRedeploy && service.Phase != "waiting_for_health" {
 		return true, nil
 	}
-	cmp, ordered := compareVersions(req.Version, service.Version)
+	cmp, ordered := dockeradapter.CompareVersions(req.Version, service.Version)
 	if (!ordered || cmp < 0) && !req.ConfirmDowngrade {
 		return false, conflict(errors.New("possible downgrade requires confirm_downgrade=true"))
 	}
@@ -835,7 +836,7 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 	}
 	ctx, cancel := m.operationContext(m.Config.Server.RequestTimeout)
 	defer cancel()
-	if err := m.Caddy.Active(ctx, service.ID, routingDomains(service, operation), target); err != nil {
+	if err := m.Caddy.Active(ctx, service.ID, routingDomains(service, operation), target, deploymentSocketName(service, target)); err != nil {
 		m.failDeferred(service, requestID, err)
 		return
 	}
@@ -1305,7 +1306,7 @@ func (m *Manager) MonitorSnapshot(ctx context.Context, id string) (model.Monitor
 			}
 			deployments[slot] = model.DeploymentStatus{
 				Version: deploy.Version, Runtime: runtime, Health: defaultHealth(deploy.Health),
-				ReceivesTraffic: configured && mode == "proxy" && socket == m.Caddy.Socket(id, slot),
+				ReceivesTraffic: configured && mode == "proxy" && socket == m.Caddy.Socket(id, slot, deploymentSocketName(service, slot)),
 			}
 		}
 		snapshot := map[string]any{
@@ -1406,7 +1407,7 @@ func (m *Manager) status(ctx context.Context, service model.Service) (*model.Sta
 		}
 		result.Deployments[slot] = model.DeploymentStatus{
 			Version: deploy.Version, Runtime: runtime, Health: defaultHealth(deploy.Health),
-			ReceivesTraffic: result.Caddy.Configured && result.Caddy.Mode == "proxy" && result.Caddy.Socket == m.Caddy.Socket(service.ID, slot),
+			ReceivesTraffic: result.Caddy.Configured && result.Caddy.Mode == "proxy" && result.Caddy.Socket == m.Caddy.Socket(service.ID, slot, deploymentSocketName(service, slot)),
 		}
 	}
 	result.Message = phaseMessage(service.Phase, service.TargetDeploy, service.LiveDeploy)
@@ -1423,7 +1424,7 @@ func (m *Manager) status(ctx context.Context, service model.Service) (*model.Sta
 	if running > 1 && service.Phase == "running" {
 		result.Warnings = append(result.Warnings, "more than one deployment is running")
 	}
-	if service.State == model.Active && result.Caddy.Socket != m.Caddy.Socket(service.ID, service.LiveDeploy) {
+	if service.State == model.Active && result.Caddy.Socket != m.Caddy.Socket(service.ID, service.LiveDeploy, deploymentSocketName(service, service.LiveDeploy)) {
 		result.Warnings = append(result.Warnings, "Caddy and TOML live deployment disagree")
 	}
 	if !result.DatasetExists {
@@ -1618,8 +1619,22 @@ func deployment(socket, id, slot string, version ...string) model.Deploy {
 	}
 	if len(version) > 0 {
 		deploy.Version = version[0]
+		_, socketName := dockeradapter.SocketLayout(version[0])
+		deploy.Socket = filepath.Join(filepath.Dir(deploy.Socket), socketName)
 	}
 	return deploy
+}
+
+func deploymentSocketName(service model.Service, slot string) string {
+	if socket := service.Deploy[slot].Socket; socket != "" {
+		return filepath.Base(socket)
+	}
+	version := service.Deploy[slot].Version
+	if version == "" {
+		version = service.Version
+	}
+	_, name := dockeradapter.SocketLayout(version)
+	return name
 }
 
 func domains(service model.Service) []string {
@@ -1642,44 +1657,6 @@ func opposite(slot string) string {
 		return "green"
 	}
 	return "blue"
-}
-
-func compareVersions(a, b string) (int, bool) {
-	parse := func(value string) ([]int, bool) {
-		value = strings.TrimPrefix(value, "v")
-		parts := strings.Split(value, ".")
-		result := make([]int, len(parts))
-		for i, part := range parts {
-			n, err := strconv.Atoi(part)
-			if err != nil {
-				return nil, false
-			}
-			result[i] = n
-		}
-		return result, true
-	}
-	ap, aok := parse(a)
-	bp, bok := parse(b)
-	if !aok || !bok {
-		return 0, false
-	}
-	length := max(len(ap), len(bp))
-	for i := 0; i < length; i++ {
-		var av, bv int
-		if i < len(ap) {
-			av = ap[i]
-		}
-		if i < len(bp) {
-			bv = bp[i]
-		}
-		if av < bv {
-			return -1, true
-		}
-		if av > bv {
-			return 1, true
-		}
-	}
-	return 0, true
 }
 
 func (m *Manager) backgroundContext() context.Context {

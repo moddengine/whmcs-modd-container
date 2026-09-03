@@ -19,6 +19,7 @@ import (
 
 	"github.com/moddengine/whmcs-container-controller/internal/caddy"
 	"github.com/moddengine/whmcs-container-controller/internal/config"
+	dockeradapter "github.com/moddengine/whmcs-container-controller/internal/docker"
 	"github.com/moddengine/whmcs-container-controller/internal/healthcheck"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 	"github.com/moddengine/whmcs-container-controller/internal/notify"
@@ -47,7 +48,7 @@ func TestDeployDomainsReplacesRoutesAndPersistsState(t *testing.T) {
 	if err := repo.Put(service); err != nil {
 		t.Fatal(err)
 	}
-	if err := adapter.Active(t.Context(), service.ID, domains(service), service.LiveDeploy); err != nil {
+	if err := adapter.Active(t.Context(), service.ID, domains(service), service.LiveDeploy, "http.sock"); err != nil {
 		t.Fatal(err)
 	}
 	manager := Manager{Repo: repo, Caddy: adapter}
@@ -85,7 +86,7 @@ func TestDeployDomainsRollsBackFailedCaddyReload(t *testing.T) {
 	if err := repo.Put(service); err != nil {
 		t.Fatal(err)
 	}
-	if err := adapter.Active(t.Context(), service.ID, domains(service), service.LiveDeploy); err != nil {
+	if err := adapter.Active(t.Context(), service.ID, domains(service), service.LiveDeploy, "http.sock"); err != nil {
 		t.Fatal(err)
 	}
 	adapter.ReloadCommand = []string{"false"}
@@ -208,11 +209,17 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 			t.Fatalf("NormalizePublicIPv4(%q) accepted invalid input", invalid)
 		}
 	}
-	if comparison, ordered := compareVersions("v21.6.23", "v21.6.24"); !ordered || comparison >= 0 {
+	if comparison, ordered := dockeradapter.CompareVersions("v21.6.23", "v21.6.24"); !ordered || comparison >= 0 {
 		t.Fatal("numeric downgrade was not detected")
 	}
-	if _, ordered := compareVersions("latest", "v21.6.24"); ordered {
+	if _, ordered := dockeradapter.CompareVersions("latest", "v21.6.24"); ordered {
 		t.Fatal("unordered tag was treated as ordered")
+	}
+	if got := deployment("/modd/host/caddy/http/{service_id}-{slot}/http.sock", "whmcs-123", "blue", "v26.1.14").Socket; got != "/modd/host/caddy/http/whmcs-123-blue/nginx.sock" {
+		t.Fatalf("legacy deployment socket = %q", got)
+	}
+	if got := deployment("/modd/host/caddy/http/{service_id}-{slot}/http.sock", "whmcs-123", "blue", "v26.1.15").Socket; got != "/modd/host/caddy/http/whmcs-123-blue/http.sock" {
+		t.Fatalf("modern deployment socket = %q", got)
 	}
 	service := model.Service{State: model.Active, Phase: "running", Version: "v2"}
 	if _, err := validateUpgrade(service, model.UpgradeRequest{Version: "v1"}, false); err == nil {

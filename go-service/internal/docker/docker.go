@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,8 @@ import (
 )
 
 const dockerHubAPI = "https://hub.docker.com/v2"
+
+const legacySocketMaxVersion = "26.1.14"
 
 const (
 	managedLabel = "au.modd.managed"
@@ -105,10 +108,12 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 		managedLabel: "true", serviceLabel: service.ID, versionLabel: service.Version,
 		appLabel: "whmcs", deployLabel: slot,
 	}
+	socketPath, _ := SocketLayout(service.Version)
 	replacer := strings.NewReplacer(
 		"{mountpoint}", service.Dataset.Mountpoint,
 		"{slot}", slot,
 		"{service_id}", service.ID,
+		"{socket_path}", socketPath,
 	)
 	env := make([]string, 0, len(cfg.Environment)+2)
 	for _, value := range cfg.Environment {
@@ -139,6 +144,49 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 		}, &network.NetworkingConfig{
 			EndpointsConfig: map[string]*network.EndpointSettings{cfg.Network: {}},
 		}, nil
+}
+
+func SocketLayout(version string) (path, name string) {
+	if comparison, ordered := CompareVersions(version, legacySocketMaxVersion); ordered && comparison <= 0 {
+		return "/run/nginx", "nginx.sock"
+	}
+	return "/run/moddengine", "http.sock"
+}
+
+func CompareVersions(a, b string) (int, bool) {
+	parse := func(value string) ([]int, bool) {
+		parts := strings.Split(strings.TrimPrefix(value, "v"), ".")
+		result := make([]int, len(parts))
+		for i, part := range parts {
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				return nil, false
+			}
+			result[i] = n
+		}
+		return result, true
+	}
+	ap, aok := parse(a)
+	bp, bok := parse(b)
+	if !aok || !bok {
+		return 0, false
+	}
+	for i := range max(len(ap), len(bp)) {
+		var av, bv int
+		if i < len(ap) {
+			av = ap[i]
+		}
+		if i < len(bp) {
+			bv = bp[i]
+		}
+		if av < bv {
+			return -1, true
+		}
+		if av > bv {
+			return 1, true
+		}
+	}
+	return 0, true
 }
 
 func (a *Adapter) Start(ctx context.Context, id string) error {

@@ -153,7 +153,7 @@ pool's snapshot and replication policy.
 | --- | --- |
 | `caddy.service_config_dir` | Host directory for generated service Caddyfiles and hostname-to-socket map fragments. |
 | `caddy.suspension_root` | Directory containing the shared `index.html`. |
-| `caddy.active_template` | Active service Caddyfile template, repeated per domain; supports `{domain}`, `{service_id}`, and `{slot}`. |
+| `caddy.active_template` | Active service Caddyfile template, repeated per domain; supports `{domain}`, `{service_id}`, `{slot}`, and `{socket_name}`. |
 | `caddy.validate_command` | Argument array run after a service-file change. |
 | `caddy.reload_command` | Argument array run after successful validation. |
 
@@ -190,10 +190,13 @@ Bind entries accept these placeholders:
 | `{mountpoint}` | Service ZFS mountpoint. |
 | `{service_id}` | Stable ID such as `whmcs-123`. |
 | `{slot}` | `blue` or `green`. |
+| `{socket_path}` | `/run/nginx` through `v26.1.14`; `/run/moddengine` for newer or non-numeric versions. |
 
 The same placeholders expand in `docker.environment` entries. The controller
 also supplies `ME_SITE`, `ME_INSTANCE`, and the slot-specific socket bind
-automatically. The image must create `http.sock` in that socket directory. See
+automatically. Images through `v26.1.14` must create `/run/nginx/nginx.sock`;
+newer and non-numeric versions must create `/run/moddengine/http.sock`. Use
+`{socket_name}` in `caddy.active_template` so Caddy follows the image. See
 [go-service/docs/container-runtime.md](go-service/docs/container-runtime.md)
 before changing mounts.
 
@@ -206,7 +209,7 @@ before changing mounts.
 | `deployment.health_initial_delay` | Delay before the first check. |
 | `deployment.health_backoff_increment` | Increasing delay between checks. |
 | `deployment.traffic_drain` | Wait before removing the old deployment. |
-| `deployment.socket` | Host, container, and Caddy-visible Unix-socket path template; supports `{service_id}` and `{slot}`. |
+| `deployment.socket` | Host Unix-socket path template; supports `{service_id}` and `{slot}`. Its filename is selected for the image version. |
 | `domains.staging_suffix` | Suffix appended to staging labels supplied by WHMCS. |
 | `dns.endpoint` | WHMCS DNS API base ending in `dns.php`; omit the section to disable updates. |
 | `dns.key_file` | File containing a WHMCS DNS API key with `dns_write` access. |
