@@ -784,7 +784,7 @@ func validateUpgrade(service model.Service, req model.UpgradeRequest, forceRedep
 	if busy(service.Phase) && !(service.Phase == "waiting_for_health" && service.Operation == "upgrade") {
 		return false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
 	}
-	if req.Version == service.Version && !forceRedeploy {
+	if req.Version == service.Version && !forceRedeploy && service.Phase != "waiting_for_health" {
 		return true, nil
 	}
 	cmp, ordered := compareVersions(req.Version, service.Version)

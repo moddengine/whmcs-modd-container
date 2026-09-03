@@ -228,6 +228,9 @@ func TestDomainAndVersionHelpers(t *testing.T) {
 	if done, err := validateUpgrade(service, model.UpgradeRequest{Version: "v3"}, false); err != nil || done {
 		t.Fatalf("in-progress unhealthy upgrade could not be superseded: done=%t err=%v", done, err)
 	}
+	if done, err := validateUpgrade(service, model.UpgradeRequest{Version: "v1"}, false); err != nil || done {
+		t.Fatalf("in-progress unhealthy upgrade could not be rolled back: done=%t err=%v", done, err)
+	}
 	service.Phase = "routing"
 	if _, err := validateUpgrade(service, model.UpgradeRequest{Version: "v3"}, false); err == nil {
 		t.Fatal("upgrade was superseded after routing started")
