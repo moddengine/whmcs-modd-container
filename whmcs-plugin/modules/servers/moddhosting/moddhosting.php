@@ -143,36 +143,16 @@ function moddhosting_AdminServicesTabFields(array $params): array
         $requestedHost = strtolower(rtrim(trim((string) ($params['domain'] ?? '')), '.'));
         $deployedHost = (string) ($status['main_domain'] ?? '');
         $deployedStaging = (string) ($status['staging_domain'] ?? '');
-        $inSync = $deployedHost !== '' && $requestedHost === $deployedHost
-            && $requestedStaging === $deployedStaging;
-        $busy = in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining'], true);
-        if ($inSync) {
-            $hostnameStatus = '<span class="text-success">&#10003; In sync</span>';
-        } elseif ($busy) {
-            $hostnameStatus = '<span class="text-warning">&#10007; Update in progress &mdash; refresh to confirm</span>';
-        } elseif ($deployedHost === '') {
-            $hostnameStatus = '<span class="text-warning">&#10007; Not deployed &mdash; run Create or Deploy</span>';
-        } else {
-            $hostnameStatus = '<span class="text-warning">&#10007; Out of sync &mdash; click Deploy to update the live hostname</span>';
-        }
-        $dnsStatus = match ((string) ($status['dns_status'] ?? '')) {
-            'in_sync' => '<span class="text-success">&#10003; In sync</span>',
-            'pending' => '<span class="text-warning">Pending</span>',
-            'error' => '<span class="text-danger">&#10007; Error</span>',
-            default => $status === [] ? 'not provisioned' : 'disabled',
-        };
-        $dnsSyncedAt = (string) ($status['dns_synced_at'] ?? '');
+        $hostnameStatus = moddhosting_hostname_status($requestedHost, $requestedStaging, $status);
+        $defaultStaging = moddhosting_default_staging_label((string) ($params['domain'] ?? ''));
         return [
             'Image Version' => '<input type="hidden" name="moddhosting_fields" value="1"><select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
             'Staging Hostname' => '<div class="input-group" style="max-width:500px"><input type="text" name="modulefields[1]" class="form-control" maxlength="32" value="'
                 . moddhosting_escape($stagingLabel) . '" placeholder="Blank to disable staging"><span class="input-group-addon">.'
-                . moddhosting_escape($stagingSuffix) . '</span></div>',
-            'Deployed Hostname' => moddhosting_escape($deployedHost !== '' ? $deployedHost : 'not provisioned'),
-            'Deployed Staging Hostname' => moddhosting_escape($deployedStaging !== '' ? $deployedStaging : 'not provisioned'),
-            'Hostname Status' => $hostnameStatus,
-            'DNS Status' => $dnsStatus,
-            'DNS Last Error' => moddhosting_escape((string) ($status['dns_last_error'] ?? '')),
-            'DNS Last Synced' => moddhosting_escape($dnsSyncedAt !== '' ? $dnsSyncedAt : 'never'),
+                . moddhosting_escape($stagingSuffix) . '</span><span class="input-group-btn"><button type="button" class="btn btn-default" data-staging-label="'
+                . moddhosting_escape($defaultStaging) . '" onclick="this.closest(\'.input-group\').querySelector(\'input\').value=this.dataset.stagingLabel">Default</button></span></div>',
+            'Hostname' => moddhosting_hostname_summary($deployedHost, $deployedStaging, $hostnameStatus),
+            'DNS Status' => moddhosting_dns_summary($status),
             'Controller State' => moddhosting_escape((string) ($status['state'] ?? 'unknown')),
             'Deployed Version' => moddhosting_escape((string) ($status['version'] ?? 'not provisioned')),
             'Live Deploy' => moddhosting_escape((string) ($status['live_deploy'] ?? 'unknown')),
@@ -187,24 +167,71 @@ function moddhosting_AdminServicesTabFields(array $params): array
     }
 }
 
-/** @param array<string, mixed> $params */
-function moddhosting_AdminServicesTabFieldsSave(array $params): void
+/**
+ * @param array<string, mixed> $params
+ * @param list<array<string, mixed>>|null $versions
+ */
+function moddhosting_AdminServicesTabFieldsSave(array $params, ?array $versions = null): void
 {
     if (($_POST['moddhosting_fields'] ?? '') !== '1') {
         return;
     }
     $fields = $_POST['modulefields'] ?? [];
-    $version = is_array($fields) ? trim((string) ($fields[0] ?? '')) : '';
-    if (!in_array($version, array_column(moddhosting_versions($params), 'version'), true)) {
-        throw new \InvalidArgumentException('Select an image version available from the controller.');
+    moddhosting_save_service_config($params, [
+        'image_version' => is_array($fields) ? ($fields[0] ?? '') : '',
+        'staging_hostname' => is_array($fields) ? ($fields[1] ?? '') : '',
+    ], $versions);
+}
+
+/**
+ * @param array<string, mixed> $params
+ * @param list<array<string, mixed>>|null $versions
+ */
+function moddhosting_updateConfig(array $params, ?array $versions = null): string
+{
+    try {
+        $config = array_intersect_key($params, array_flip(['image_version', 'staging_hostname']));
+        moddhosting_save_service_config($params, $config, $versions);
+        return 'success';
+    } catch (\Throwable $error) {
+        return $error->getMessage();
     }
-    $staging = strtolower(trim((string) ($fields[1] ?? '')));
-    if ($staging !== '' && !moddhosting_valid_staging_label($staging)) {
-        throw new \InvalidArgumentException('Staging hostname must be a valid DNS label of at most 32 characters.');
+}
+
+/**
+ * @param array<string, mixed> $params
+ * @param array<string, mixed> $config
+ * @param list<array<string, mixed>>|null $versions
+ */
+function moddhosting_save_service_config(array $params, array $config, ?array $versions = null): void
+{
+    $values = [];
+    if (array_key_exists('image_version', $config)) {
+        if (!is_string($config['image_version'])) {
+            throw new \InvalidArgumentException('Image version must be a string.');
+        }
+        $version = trim($config['image_version']);
+        if (!in_array($version, array_column($versions ?? moddhosting_versions($params), 'version'), true)) {
+            throw new \InvalidArgumentException('Select an image version available from the controller.');
+        }
+        $values['image_version'] = $version;
+    }
+    if (array_key_exists('staging_hostname', $config)) {
+        if (!is_string($config['staging_hostname'])) {
+            throw new \InvalidArgumentException('Staging hostname must be a string.');
+        }
+        $staging = strtolower(trim($config['staging_hostname']));
+        if ($staging !== '' && !moddhosting_valid_staging_label($staging)) {
+            throw new \InvalidArgumentException('Staging hostname must be a valid DNS label of at most 32 characters.');
+        }
+        $values['staging_label'] = $staging;
+    }
+    if ($values === []) {
+        throw new \InvalidArgumentException('Provide image_version or staging_hostname.');
     }
     Capsule::table('mod_moddhosting_services')->updateOrInsert(
         ['service_id' => (int) $params['serviceid']],
-        ['image_version' => $version, 'staging_label' => $staging],
+        $values,
     );
 }
 
@@ -413,6 +440,52 @@ function moddhosting_package(array $params): array
 function moddhosting_valid_staging_label(string $label): bool
 {
     return strlen($label) <= 32 && preg_match('/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/D', $label) === 1;
+}
+
+function moddhosting_default_staging_label(string $domain): string
+{
+    return rtrim(substr(str_replace('.', '-', strtolower(rtrim(trim($domain), '.'))), 0, 32), '-');
+}
+
+function moddhosting_hostname_summary(string $live, string $staging, string $status): string
+{
+    $live = $live === '' ? 'not provisioned' : '<a href="https://' . moddhosting_escape($live) . '" target="_blank" rel="noopener noreferrer">' . moddhosting_escape($live) . '</a>';
+    $staging = $staging === '' ? 'disabled' : '<a href="https://' . moddhosting_escape($staging) . '" target="_blank" rel="noopener noreferrer">' . moddhosting_escape($staging) . '</a>';
+    return $live . ' (Staging: ' . $staging . ') ' . $status;
+}
+
+/** @param array<string, mixed> $status */
+function moddhosting_hostname_status(string $requestedHost, string $requestedStaging, array $status): string
+{
+    $deployedHost = (string) ($status['main_domain'] ?? '');
+    $inSync = $deployedHost !== '' && $requestedHost === $deployedHost
+        && $requestedStaging === (string) ($status['staging_domain'] ?? '');
+    $busy = in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining'], true);
+    if ($inSync) {
+        return '<span class="text-success">&#10003; In sync</span>';
+    }
+    if ($busy) {
+        return '<span class="text-warning">&#10007; Update in progress &mdash; refresh to confirm</span>';
+    }
+    if ($deployedHost === '') {
+        return '<span class="text-warning">&#10007; Not deployed &mdash; run Create or Deploy</span>';
+    }
+    return '<span class="text-warning">&#10007; Out of sync &mdash; click Deploy to update the live hostname</span>';
+}
+
+/** @param array<string, mixed> $status */
+function moddhosting_dns_summary(array $status): string
+{
+    $state = match ((string) ($status['dns_status'] ?? '')) {
+        'in_sync' => '<span class="text-success">&#10003; In sync</span>',
+        'pending' => '<span class="text-warning">Pending</span>',
+        'error' => '<span class="text-danger">&#10007; Error</span>',
+        default => $status === [] ? 'not provisioned' : 'disabled',
+    };
+    $error = trim((string) ($status['dns_last_error'] ?? ''));
+    $syncedAt = trim((string) ($status['dns_synced_at'] ?? ''));
+    return $state . ($error === '' ? ' (No Errors)' : ' (Error: ' . moddhosting_escape($error) . ')')
+        . ' Last Synced: ' . moddhosting_escape($syncedAt === '' ? 'never' : $syncedAt);
 }
 
 /** @param array<string, mixed> $params */
