@@ -17,6 +17,14 @@ jobs:
         with:
           go-version-file: go-service/go.mod
           cache-dependency-path: go-service/go.sum
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install WHMCS plugin development dependencies
+        run: composer install --working-dir=whmcs-plugin --no-interaction --no-progress --prefer-dist
 
       - name: Build controller
         working-directory: go-service
@@ -34,8 +42,14 @@ jobs:
         working-directory: whmcs-plugin
         run: |
           version=${GITHUB_REF_NAME#v}
-          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           sed -i "s/'version' => 'DEV'/'version' => '$version'/" modules/addons/moddhosting/moddhosting.php
+          for type in addons servers; do
+            vendor/bin/whmcs-plugin-manifest "modules/$type/moddhosting" \
+              --asset 'modd-hosting-whmcs-v{version}.zip' \
+              --whmcs-min 8.13.0 \
+              --whmcs-max-exclusive 10.0.0
+          done
           grep -Fq "'version' => '$version'" modules/addons/moddhosting/moddhosting.php
           zip -r "../modd-hosting-whmcs-${GITHUB_REF_NAME}.zip" modules
 
