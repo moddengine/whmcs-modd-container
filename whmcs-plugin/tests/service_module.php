@@ -112,6 +112,18 @@ try {
 $versions = [['version' => 'v26.6.8'], ['version' => 'v26.7.0']];
 $params = ['serviceid' => 123];
 
+$_POST = [
+    'action' => 'ModuleCustom',
+    'serviceid' => '123',
+    'func_name' => 'updateConfig',
+    'image_version' => 'v26.7.0',
+    'staging_hostname' => 'API-Stage',
+];
+assert(moddhosting_updateConfig($params, $versions) === 'success');
+assert(Capsule::$services[123] === ['image_version' => 'v26.7.0', 'staging_label' => 'api-stage']);
+$_POST = [];
+Capsule::$services = [];
+
 assert(moddhosting_updateConfig($params + ['image_version' => 'v26.6.8'], $versions) === 'success');
 assert(Capsule::$services[123] === ['image_version' => 'v26.6.8']);
 assert(moddhosting_updateConfig($params + ['image_version' => 'missing'], $versions) === 'Select an image version available from the controller.');

@@ -190,7 +190,7 @@ function moddhosting_AdminServicesTabFieldsSave(array $params, ?array $versions 
 function moddhosting_updateConfig(array $params, ?array $versions = null): string
 {
     try {
-        $config = array_intersect_key($params, array_flip(['image_version', 'staging_hostname']));
+        $config = array_intersect_key(array_merge($params, $_POST), array_flip(['image_version', 'staging_hostname']));
         moddhosting_save_service_config($params, $config, $versions);
         return 'success';
     } catch (\Throwable $error) {
