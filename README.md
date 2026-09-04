@@ -219,10 +219,14 @@ For example, staging label `preview` with suffix `staging.com` becomes
 returns HTTP 2xx. Failed provision and upgrade artifacts remain in place for
 diagnosis.
 
-DNS updates set the domain A record, remove its AAAA record, and replace the
-`www` A/AAAA records with a CNAME to the domain. They run after healthy routing
-without blocking the site. Failures are logged, recorded in service status,
-and retried twice after 30 seconds and 5 minutes.
+After a container becomes healthy, the controller verifies the domain A record
+and `www` CNAME before enabling its Caddy route. Drifted records are repaired,
+including removal of conflicting AAAA and `www` A/AAAA records, then routing
+waits five seconds for DNS propagation. Transient failures also wait five
+seconds before routing and retain the existing background retries; `403` and
+mutation `404` responses are recorded as permanent and do not retry. When the
+main domain changes, records on the old domain that still point to the service
+are removed after the new route is active.
 Administrators can queue the current domain and IPv4 again with
 `POST /v1/services/{id}/dns/reconnect`.
 

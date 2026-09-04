@@ -118,10 +118,11 @@ group values as `<slug>|<display name>`.
    when running or started when stopped; otherwise the controller creates it.
 8. It persists phase `waiting_for_health` and health `checking`, starts the
    deferred health/routing work, and returns `202`.
-9. After health succeeds, the controller writes the active Caddyfile for the
-   main domain and the staging domain when supplied, validates and reloads
-   Caddy, then commits phase `running`, clears the target fields and last
-   error, and sends a best-effort notification.
+9. After health succeeds, the controller verifies or repairs DNS, waits five
+   seconds after a change or transient DNS failure, then writes the active
+   Caddyfile for the main domain and the staging domain when supplied.
+10. It validates and reloads Caddy, then commits phase `running`, clears the
+    target fields and last error, and sends a best-effort notification.
 
 If a synchronous step fails, the endpoint returns `422`, phase becomes
 `failed`, and `last_error` contains the cause. If deferred health or Caddy work
@@ -156,6 +157,26 @@ the target passes this gate.
 Health is deployment evidence recorded during lifecycle work, not a continuous
 probe. A later application failure does not automatically change it or trigger
 a restart beyond Docker's configured restart policy.
+
+## DNS before routing
+
+Before provision, upgrade, redeploy, resume, or a live hostname/IP change is
+routed, the controller reads the apex A and `www` CNAME RRsets. The desired
+state is exactly one apex A value matching the service IPv4 and exactly one
+`www` CNAME value matching the apex. Repairing the apex also deletes its AAAA
+RRset; repairing `www` deletes its A and AAAA RRsets before writing the CNAME.
+
+An already-correct response proceeds to Caddy immediately. A successful repair
+or transient error waits five seconds before Caddy is configured so the first
+ACME attempt can observe the new records. Transient errors retain the normal
+background retries. `403` and mutation `404` responses are permanent and route
+immediately without retry; a GET `404` means the RRset is missing and should be
+created.
+
+After a main-domain move is active in Caddy, cleanup removes the old `www`
+CNAME and only the old apex A value that matches the service's previous IPv4.
+Other A values are preserved. Cleanup is best effort and retries a transient
+failure once after 30 seconds.
 
 ## Caddy service files
 
@@ -214,8 +235,9 @@ For an upgrade from blue to green:
 5. Create and start green with the target image.
 6. Persist `waiting_for_health` with green health `checking`, start deferred
    work, and return `202`. Blue continues serving traffic.
-7. When green is healthy, atomically change the Caddyfile to green and persist
-   phase `draining`.
+7. When green is healthy, verify or repair DNS and wait five seconds after a
+   change or transient failure, then atomically change the Caddyfile to green
+   and persist phase `draining`.
 8. Wait `deployment.traffic_drain`, then remove the old blue container.
 9. Commit `live_deploy=green`, the new service version, phase `running`, and
    clear the operation/target fields.
@@ -254,10 +276,11 @@ value of at most 250 characters:
    falling back to the stored package when omitted. The stopped live-slot
    container remains untouched until the target is healthy.
 4. Persist phase `waiting_for_health` and health `checking`, then return `202`.
-5. Only after health succeeds, replace the suspension page or missing route
-   with the active Caddy proxy, remove the previous stopped container, and
-   commit the target as live and phase `running`. Cleanup failures are logged
-   without failing the healthy resume.
+5. Only after health succeeds, verify or repair DNS and wait five seconds after
+   a change or transient failure, then replace the suspension page or missing
+   route with the active Caddy proxy, remove the previous stopped container,
+   and commit the target as live and phase `running`. Cleanup failures are
+   logged without failing the healthy resume.
 
 Thus a resumed application never receives traffic merely because Docker
 started it. A resume health failure leaves the previous suspension route in

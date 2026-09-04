@@ -30,6 +30,10 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return fn(request) }
 
+func testHTTPResponse(status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Status: fmt.Sprintf("%d %s", status, http.StatusText(status)), Body: io.NopCloser(strings.NewReader(body))}
+}
+
 func TestDeployDomainsReplacesRoutesAndPersistsState(t *testing.T) {
 	root := t.TempDir()
 	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
@@ -66,6 +70,59 @@ func TestDeployDomainsReplacesRoutesAndPersistsState(t *testing.T) {
 	persisted, err := repo.Get(service.ID)
 	if err != nil || persisted.MainDomain != updated.MainDomain || persisted.StagingDomain != updated.StagingDomain {
 		t.Fatalf("deployed hostname was not persisted: %#v, %v", persisted, err)
+	}
+}
+
+func TestDeployDomainsCleansOldDNSAfterCaddy(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	adapter := caddy.Adapter{
+		Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
+		ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"},
+	}
+	service := model.Service{
+		ID: "whmcs-123", State: model.Active, Phase: "running", LiveDeploy: "blue", Version: "v1",
+		MainDomain: "old.example.com", PublicIPv4: "203.0.113.10", Deploy: map[string]model.Deploy{"blue": {}},
+	}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Active(t.Context(), service.ID, []string{service.MainDomain}, service.LiveDeploy, "http.sock"); err != nil {
+		t.Fatal(err)
+	}
+	cleanupDone := make(chan bool, 1)
+	var cleanupCalls atomic.Int32
+	manager := Manager{
+		Repo: repo, Caddy: adapter, Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if strings.Contains(request.URL.Path, "old.example.com") {
+				content, _ := os.ReadFile(adapter.Path(service.ID))
+				if cleanupCalls.Add(1) == 2 {
+					cleanupDone <- strings.Contains(string(content), "new.example.com") && !strings.Contains(string(content), "old.example.com")
+				}
+				return testHTTPResponse(http.StatusNotFound, ""), nil
+			}
+			value := "new.example.com"
+			if strings.HasSuffix(request.URL.Path, "/A") {
+				value = service.PublicIPv4
+			}
+			return testHTTPResponse(http.StatusOK, `{"values":["`+value+`"]}`), nil
+		})},
+	}
+	updated, err := manager.deployDomains(t.Context(), service.ID, "new.example.com", "", service.PublicIPv4)
+	if err != nil || updated.MainDomain != "new.example.com" {
+		t.Fatalf("domain move = %#v, %v", updated, err)
+	}
+	select {
+	case cleanupAfterCaddy := <-cleanupDone:
+		if !cleanupAfterCaddy {
+			t.Fatal("old DNS cleanup ran before the new Caddy route")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old DNS cleanup did not run")
 	}
 }
 
@@ -291,13 +348,19 @@ func TestDNSAPIWritesWebsiteRecords(t *testing.T) {
 				body, _ = io.ReadAll(request.Body)
 			}
 			requests = append(requests, capturedRequest{request.Method, request.URL.Path, string(body), request.Header.Get("Auth-Key")})
-			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+			if request.Method == http.MethodGet {
+				return testHTTPResponse(http.StatusNotFound, ""), nil
+			}
+			return testHTTPResponse(http.StatusNoContent, ""), nil
 		})},
 	}
-	if err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10"); err != nil {
+	changed, err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10")
+	if err != nil || !changed {
 		t.Fatal(err)
 	}
 	want := []capturedRequest{
+		{http.MethodGet, "/modules/addons/whmcs_dns/dns.php/record/example.com/A", "", "secret"},
+		{http.MethodGet, "/modules/addons/whmcs_dns/dns.php/record/www.example.com/CNAME", "", "secret"},
 		{http.MethodPut, "/modules/addons/whmcs_dns/dns.php/record/example.com/A", `{"values":["203.0.113.10"]}`, "secret"},
 		{http.MethodDelete, "/modules/addons/whmcs_dns/dns.php/record/example.com/AAAA", "", "secret"},
 		{http.MethodDelete, "/modules/addons/whmcs_dns/dns.php/record/www.example.com/A", "", "secret"},
@@ -313,20 +376,206 @@ func TestDNSAPIFailureStopsSequence(t *testing.T) {
 	var calls int
 	manager := Manager{
 		Config: testDNSConfig(), DNSKey: "secret",
-		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			calls++
+			if request.Method == http.MethodGet {
+				return testHTTPResponse(http.StatusNotFound, ""), nil
+			}
 			status := http.StatusNoContent
 			body := ""
 			if calls == 3 {
 				status = http.StatusInternalServerError
 				body = `{"error":"provider_error","message":"Unable to update DNS provider."}`
 			}
-			return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader(body))}, nil
+			return testHTTPResponse(status, body), nil
 		})},
 	}
-	err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10")
-	if calls != 3 || err == nil || !strings.Contains(err.Error(), `DELETE www.example.com A: WHMCS DNS API returned Internal Server Error: {"error":"provider_error"`) {
+	_, err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10")
+	if calls != 3 || err == nil || !strings.Contains(err.Error(), `PUT example.com A: WHMCS DNS API returned 500 Internal Server Error: {"error":"provider_error"`) {
 		t.Fatalf("calls/error = %d / %v", calls, err)
+	}
+}
+
+func TestDNSAPISkipsMatchingRecords(t *testing.T) {
+	var requests []string
+	manager := Manager{
+		Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests = append(requests, request.Method+" "+request.URL.Path)
+			value := "example.com"
+			if strings.HasSuffix(request.URL.Path, "/A") {
+				value = "203.0.113.10"
+			}
+			return testHTTPResponse(http.StatusOK, `{"values":["`+value+`"]}`), nil
+		})},
+	}
+	changed, err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10")
+	if err != nil || changed || !reflect.DeepEqual(requests, []string{
+		"GET /modules/addons/whmcs_dns/dns.php/record/example.com/A",
+		"GET /modules/addons/whmcs_dns/dns.php/record/www.example.com/CNAME",
+	}) {
+		t.Fatalf("matching DNS changed=%t requests=%#v error=%v", changed, requests, err)
+	}
+}
+
+func TestDNSAPIRepairsOnlyMissingCNAME(t *testing.T) {
+	var requests []string
+	manager := Manager{
+		Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var body []byte
+			if request.Body != nil {
+				body, _ = io.ReadAll(request.Body)
+			}
+			requests = append(requests, request.Method+" "+request.URL.Path+" "+string(body))
+			if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/A") {
+				return testHTTPResponse(http.StatusOK, `{"values":["203.0.113.10"]}`), nil
+			}
+			if request.Method == http.MethodGet {
+				return testHTTPResponse(http.StatusNotFound, ""), nil
+			}
+			return testHTTPResponse(http.StatusNoContent, ""), nil
+		})},
+	}
+	changed, err := manager.callDNSAPI(t.Context(), "example.com", "203.0.113.10")
+	if err != nil || !changed || !reflect.DeepEqual(requests, []string{
+		"GET /modules/addons/whmcs_dns/dns.php/record/example.com/A ",
+		"GET /modules/addons/whmcs_dns/dns.php/record/www.example.com/CNAME ",
+		"DELETE /modules/addons/whmcs_dns/dns.php/record/www.example.com/A ",
+		"DELETE /modules/addons/whmcs_dns/dns.php/record/www.example.com/AAAA ",
+		`PUT /modules/addons/whmcs_dns/dns.php/record/www.example.com/CNAME {"values":["example.com"]}`,
+	}) {
+		t.Fatalf("CNAME repair changed=%t requests=%#v error=%v", changed, requests, err)
+	}
+}
+
+func TestDNSPermanentErrorStopsRetries(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{ID: "whmcs-123", MainDomain: "example.com", PublicIPv4: "203.0.113.10", DNSStatus: "pending"}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	manager := Manager{
+		Repo: repo, dnsBackoffs: []time.Duration{0, 0, 0}, Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return testHTTPResponse(http.StatusForbidden, `{"error":"forbidden"}`), nil
+		})},
+	}
+	manager.syncDNS(t.Context(), service.ID, service.MainDomain, service.PublicIPv4)
+	got, _ := repo.Get(service.ID)
+	if calls.Load() != 1 || got.DNSStatus != "error" || !strings.Contains(got.DNSLastError, "403 Forbidden") {
+		t.Fatalf("permanent DNS calls=%d service=%#v", calls.Load(), got)
+	}
+}
+
+func TestDNSMutationNotFoundStopsRetries(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	service := model.Service{ID: "whmcs-123", MainDomain: "example.com", PublicIPv4: "203.0.113.10", DNSStatus: "pending"}
+	if err := repo.Put(service); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	manager := Manager{
+		Repo: repo, dnsBackoffs: []time.Duration{0, 0, 0}, Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			if request.Method == http.MethodGet {
+				return testHTTPResponse(http.StatusNotFound, ""), nil
+			}
+			return testHTTPResponse(http.StatusNotFound, `{"error":"not_found"}`), nil
+		})},
+	}
+	manager.syncDNS(t.Context(), service.ID, service.MainDomain, service.PublicIPv4)
+	got, _ := repo.Get(service.ID)
+	if calls.Load() != 3 || got.DNSStatus != "error" || !strings.Contains(got.DNSLastError, "404 Not Found") {
+		t.Fatalf("mutation 404 calls=%d service=%#v", calls.Load(), got)
+	}
+}
+
+func TestOldDNSCleanupPreservesUnrelatedAValues(t *testing.T) {
+	var requests []string
+	manager := Manager{
+		Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var body []byte
+			if request.Body != nil {
+				body, _ = io.ReadAll(request.Body)
+			}
+			requests = append(requests, request.Method+" "+request.URL.Path+" "+string(body))
+			if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/A") {
+				return testHTTPResponse(http.StatusOK, `{"values":["203.0.113.10","198.51.100.20"]}`), nil
+			}
+			if request.Method == http.MethodGet {
+				return testHTTPResponse(http.StatusOK, `{"values":["somewhere.example"]}`), nil
+			}
+			return testHTTPResponse(http.StatusNoContent, ""), nil
+		})},
+	}
+	if err := manager.cleanupOldDNS(t.Context(), "old.example.com", "203.0.113.10"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(requests, []string{
+		"GET /modules/addons/whmcs_dns/dns.php/record/old.example.com/A ",
+		`PUT /modules/addons/whmcs_dns/dns.php/record/old.example.com/A {"values":["198.51.100.20"]}`,
+		"GET /modules/addons/whmcs_dns/dns.php/record/www.old.example.com/CNAME ",
+		"DELETE /modules/addons/whmcs_dns/dns.php/record/www.old.example.com/CNAME ",
+	}) {
+		t.Fatalf("old DNS cleanup requests = %#v", requests)
+	}
+}
+
+func TestOldDNSCleanupDeletesSoleA(t *testing.T) {
+	var mutations []string
+	manager := Manager{
+		Config: testDNSConfig(), DNSKey: "secret",
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodGet {
+				mutations = append(mutations, request.Method+" "+request.URL.Path)
+				return testHTTPResponse(http.StatusNoContent, ""), nil
+			}
+			if strings.HasSuffix(request.URL.Path, "/A") {
+				return testHTTPResponse(http.StatusOK, `{"values":["203.0.113.10"]}`), nil
+			}
+			return testHTTPResponse(http.StatusNotFound, ""), nil
+		})},
+	}
+	if err := manager.cleanupOldDNS(t.Context(), "old.example.com", "203.0.113.10"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(mutations, []string{"DELETE /modules/addons/whmcs_dns/dns.php/record/old.example.com/A"}) {
+		t.Fatalf("old DNS mutations = %#v", mutations)
+	}
+}
+
+func TestOldDNSCleanupRetriesOnce(t *testing.T) {
+	var calls atomic.Int32
+	var logs bytes.Buffer
+	manager := Manager{
+		Context: t.Context(), Config: testDNSConfig(), DNSKey: "secret", dnsCleanupDelay: time.Nanosecond,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			if calls.Add(1) == 1 {
+				return testHTTPResponse(http.StatusInternalServerError, ""), nil
+			}
+			return testHTTPResponse(http.StatusNotFound, ""), nil
+		})},
+	}
+	manager.cleanupOldDNSAsync("whmcs-123", "old.example.com", "203.0.113.10")
+	for deadline := time.Now().Add(time.Second); calls.Load() < 3 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	}
+	time.Sleep(time.Millisecond)
+	if calls.Load() != 3 || strings.Count(logs.String(), `"msg":"old DNS cleanup failed"`) != 1 || !strings.Contains(logs.String(), `"retry_in":"1ns"`) {
+		t.Fatalf("cleanup calls=%d logs=%s", calls.Load(), logs.String())
 	}
 }
 
@@ -370,7 +619,7 @@ func TestDNSFailureDoesNotChangeRunningWorkload(t *testing.T) {
 	if err != nil || got.DNSStatus != "error" || got.DNSLastError == "" || got.State != model.Active || got.Phase != "running" {
 		t.Fatalf("service after DNS failure = %#v, %v", got, err)
 	}
-	if !strings.Contains(logs.String(), `"level":"ERROR"`) || !strings.Contains(logs.String(), `"attempt":1`) || !strings.Contains(logs.String(), `"method":"PUT"`) || !strings.Contains(logs.String(), `"record_type":"A"`) {
+	if !strings.Contains(logs.String(), `"level":"ERROR"`) || !strings.Contains(logs.String(), `"attempt":1`) || !strings.Contains(logs.String(), `"method":"GET"`) || !strings.Contains(logs.String(), `"record_type":"A"`) {
 		t.Fatalf("exhausted DNS log = %q", logs.String())
 	}
 	got.DNSStatus = "pending"
@@ -405,12 +654,16 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0, 0, 0},
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 		Config: testDNSConfig(), DNSKey: "secret",
-		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			status := 500
-			if calls.Add(1) >= 3 {
-				status = 204
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			call := calls.Add(1)
+			if call <= 2 {
+				return testHTTPResponse(http.StatusInternalServerError, ""), nil
 			}
-			return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(bytes.NewReader(nil))}, nil
+			value := service.MainDomain
+			if strings.HasSuffix(request.URL.Path, "/A") {
+				value = service.PublicIPv4
+			}
+			return testHTTPResponse(http.StatusOK, `{"values":["`+value+`"]}`), nil
 		})},
 	}
 	if _, err := manager.queueDNS(service); err != nil {
@@ -420,7 +673,7 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 		got, _ := repo.Get(service.ID)
 		if got.DNSStatus == "in_sync" {
-			if calls.Load() != 7 || got.DNSSyncedAt == "" {
+			if calls.Load() != 4 || got.DNSSyncedAt == "" {
 				t.Fatalf("calls/status = %d / %#v", calls.Load(), got)
 			}
 			synced = true
@@ -439,11 +692,11 @@ func TestDNSRetriesAndIdempotentQueue(t *testing.T) {
 	}
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 		latest, _ = repo.Get(service.ID)
-		if calls.Load() == 12 && latest.DNSStatus == "in_sync" {
+		if calls.Load() == 6 && latest.DNSStatus == "in_sync" {
 			break
 		}
 	}
-	if calls.Load() != 12 || latest.DNSStatus != "in_sync" {
+	if calls.Load() != 6 || latest.DNSStatus != "in_sync" {
 		t.Fatalf("successful DNS deployment was not safely repeated: calls=%d service=%#v", calls.Load(), latest)
 	}
 }
@@ -464,6 +717,9 @@ func TestReconnectDNSCoalescesRepeatedRequests(t *testing.T) {
 		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0},
 		Config: testDNSConfig(), DNSKey: "secret",
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method == http.MethodGet {
+				return testHTTPResponse(http.StatusNotFound, ""), nil
+			}
 			if request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/record/example.com/A") {
 				calls.Add(1)
 				started <- struct{}{}
@@ -515,6 +771,9 @@ func TestDNSWorkerIsSerialAndKeepsLatestQueuedValue(t *testing.T) {
 		Context: t.Context(), Repo: repo, dnsBackoffs: []time.Duration{0},
 		Config: testDNSConfig(), DNSKey: "secret",
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method == http.MethodGet {
+				return testHTTPResponse(http.StatusNotFound, ""), nil
+			}
 			if request.Method != http.MethodPut || !strings.HasSuffix(request.URL.Path, "/A") {
 				return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
 			}
@@ -639,8 +898,12 @@ func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
 		Caddy:  caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
 		Config: testDNSConfig(), DNSKey: "secret",
 		healthAttempts: map[string]uint64{service.ID: 1},
-		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 204, Status: "204 No Content", Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			value := service.MainDomain
+			if strings.HasSuffix(request.URL.Path, "/A") {
+				value = service.PublicIPv4
+			}
+			return testHTTPResponse(http.StatusOK, `{"values":["`+value+`"]}`), nil
 		})},
 	}
 	manager.finishHealth(service, "provision", "request-1", 1)

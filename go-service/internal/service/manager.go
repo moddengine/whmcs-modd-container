@@ -71,6 +71,8 @@ type Manager struct {
 	healthAttempts           map[string]uint64
 	dnsBackoffs              []time.Duration
 	dnsTimeout               time.Duration
+	dnsPropagationDelay      time.Duration
+	dnsCleanupDelay          time.Duration
 	dnsHTTPClient            *http.Client
 	dnsWake                  chan struct{}
 	dnsPending               map[string]dnsUpdate
@@ -92,6 +94,22 @@ func (e *dnsRequestError) Error() string {
 }
 
 func (e *dnsRequestError) Unwrap() error { return e.err }
+
+type dnsHTTPError struct {
+	statusCode int
+	message    string
+}
+
+func (e *dnsHTTPError) Error() string { return e.message }
+
+type dnsRecordSet struct {
+	Values []string `json:"values"`
+}
+
+type dnsRecordRequest struct {
+	method, fqdn, recordType string
+	values                   []string
+}
 
 func ValidateServiceID(id string) error {
 	if !serviceIDPattern.MatchString(id) {
@@ -365,43 +383,67 @@ func (m *Manager) changeDomains(ctx context.Context, id, mainDomain, stagingDoma
 
 func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDomain string, requestedIPv4 ...string) (model.Service, error) {
 	m.mu.Lock()
-	var queued *dnsUpdate
-	defer func() {
-		m.mu.Unlock()
-		if queued != nil {
-			m.enqueueDNS(queued.id, queued.domain, queued.publicIPv4)
-		}
-	}()
 	service, err := m.liveService(id)
 	if err != nil {
+		m.mu.Unlock()
 		return service, err
 	}
 	derive(&service)
 	publicIPv4 := service.PublicIPv4
-	queueDNS := len(requestedIPv4) != 0 && m.dnsEnabled()
-	if queueDNS {
+	prepareDNS := len(requestedIPv4) != 0 && m.dnsEnabled()
+	if len(requestedIPv4) != 0 {
 		publicIPv4 = requestedIPv4[0]
 	}
+	if !(service.State == model.Suspended && service.Phase == "stopped") && (service.State != model.Active || service.Phase != "running") {
+		m.mu.Unlock()
+		return service, conflict(fmt.Errorf("cannot deploy hostname while service is %s", service.Phase))
+	}
+	original := service
+	m.mu.Unlock()
+
+	retryDNS := false
+	var dnsErr error
+	if prepareDNS {
+		retryDNS, dnsErr = m.prepareDNSForRouting(ctx, id, mainDomain, publicIPv4)
+		if ctx.Err() != nil {
+			return service, internal(ctx.Err())
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	service, err = m.liveService(id)
+	if err != nil {
+		return service, err
+	}
+	derive(&service)
+	if service.State != original.State || service.Phase != original.Phase || service.LiveDeploy != original.LiveDeploy ||
+		service.MainDomain != original.MainDomain || service.StagingDomain != original.StagingDomain || service.PublicIPv4 != original.PublicIPv4 {
+		return service, conflict(errors.New("service state changed during DNS preparation"))
+	}
 	oldDomains := domains(service)
+	domainsChanged := service.MainDomain != mainDomain || service.StagingDomain != stagingDomain
+	mainDomainChanged := service.MainDomain != mainDomain
 	apply := func(ctx context.Context, id string, domains []string, slot string) error {
 		return m.Caddy.Active(ctx, id, domains, slot, deploymentSocketName(service, slot))
 	}
-	if service.State == model.Suspended && service.Phase == "stopped" {
+	if service.State == model.Suspended {
 		apply = func(ctx context.Context, id string, domains []string, _ string) error {
 			return m.Caddy.Suspended(ctx, id, domains)
 		}
-	} else if service.State != model.Active || service.Phase != "running" {
-		return service, conflict(fmt.Errorf("cannot deploy hostname while service is %s", service.Phase))
 	}
-	domainsChanged := service.MainDomain != mainDomain || service.StagingDomain != stagingDomain
 	if domainsChanged {
-		if err := apply(ctx, id, []string{mainDomain, stagingDomain}, service.LiveDeploy); err != nil {
+		updatedDomains := []string{mainDomain}
+		if stagingDomain != "" {
+			updatedDomains = append(updatedDomains, stagingDomain)
+		}
+		if err := apply(ctx, id, updatedDomains, service.LiveDeploy); err != nil {
 			return service, unprocessable("hostname_change_failed", err)
 		}
 	}
 	service.MainDomain, service.StagingDomain, service.PublicIPv4, service.UpdatedAt = mainDomain, stagingDomain, publicIPv4, time.Now().UTC()
-	if queueDNS {
-		service.DNSStatus, service.DNSLastError = "pending", ""
+	if prepareDNS {
+		setDNSResult(&service, retryDNS, dnsErr)
 	}
 	if err := m.Repo.Put(service); err != nil {
 		if domainsChanged {
@@ -411,8 +453,11 @@ func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDoma
 		}
 		return service, internal(fmt.Errorf("persist hostname change: %w", err))
 	}
-	if queueDNS {
-		queued = &dnsUpdate{id: id, domain: mainDomain, publicIPv4: publicIPv4}
+	if retryDNS {
+		go m.enqueueDNS(id, mainDomain, publicIPv4)
+	}
+	if prepareDNS && mainDomainChanged {
+		m.cleanupOldDNSAsync(id, original.MainDomain, original.PublicIPv4)
 	}
 	return service, nil
 }
@@ -810,6 +855,19 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 		return
 	}
 	target = service.TargetDeploy
+	dnsDomain, dnsIPv4 := service.MainDomain, service.PublicIPv4
+	oldDomain, oldIPv4 := "", ""
+	if operation == "upgrade" {
+		if service.TargetMainDomain != "" {
+			dnsDomain = service.TargetMainDomain
+			if dnsDomain != service.MainDomain {
+				oldDomain, oldIPv4 = service.MainDomain, service.PublicIPv4
+			}
+		}
+		if service.TargetPublicIPv4 != "" {
+			dnsIPv4 = service.TargetPublicIPv4
+		}
+	}
 	if healthErr != nil {
 		service.Deploy[target] = withHealth(service.Deploy[target], "unhealthy")
 		service.Phase, service.LastError, service.UpdatedAt = "failed", healthErr.Error(), time.Now().UTC()
@@ -826,6 +884,9 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 	}
 	service.Deploy[target] = withHealth(service.Deploy[target], "healthy")
 	service.Phase, service.UpdatedAt = "routing", time.Now().UTC()
+	if m.dnsEnabled() {
+		service.DNSStatus, service.DNSLastError = "pending", ""
+	}
 	err = m.Repo.Put(service)
 	m.mu.Unlock()
 	if err != nil {
@@ -836,6 +897,17 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 	}
 	ctx, cancel := m.operationContext(m.Config.Server.RequestTimeout)
 	defer cancel()
+	retryDNS := false
+	if m.dnsEnabled() {
+		var dnsErr error
+		retryDNS, dnsErr = m.prepareDNSForRouting(ctx, service.ID, dnsDomain, dnsIPv4)
+		if ctx.Err() != nil {
+			m.failDeferred(service, requestID, ctx.Err())
+			return
+		}
+		setDNSResult(&service, retryDNS, dnsErr)
+		m.putDeferred(service)
+	}
 	if err := m.Caddy.Active(ctx, service.ID, routingDomains(service, operation), target, deploymentSocketName(service, target)); err != nil {
 		m.failDeferred(service, requestID, err)
 		return
@@ -869,14 +941,14 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 		service.State, service.LiveDeploy, service.Package = model.Active, target, service.TargetPackage
 	}
 	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.TargetPublicIPv4, service.TargetPackage, service.LastError, service.UpdatedAt = "running", "", "", "", "", "", "", nil, "", time.Now().UTC()
-	if m.dnsEnabled() {
-		service.DNSStatus, service.DNSLastError = "pending", ""
-	}
 	m.putDeferred(service)
-	if m.dnsEnabled() {
-		m.enqueueDNS(service.ID, service.MainDomain, service.PublicIPv4)
+	if retryDNS {
+		m.enqueueDNS(service.ID, dnsDomain, dnsIPv4)
 	}
 	m.notifyAsync(operation, true, service, requestID, "")
+	if oldDomain != "" {
+		m.cleanupOldDNSAsync(service.ID, oldDomain, oldIPv4)
+	}
 }
 
 func (m *Manager) finishRouting(id, operation, requestID string) {
@@ -1092,7 +1164,7 @@ func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 				return
 			}
 		}
-		err = m.callDNSAPI(ctx, domain, publicIPv4)
+		_, err = m.callDNSAPI(ctx, domain, publicIPv4)
 		if err == nil {
 			break
 		}
@@ -1105,11 +1177,14 @@ func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 			if errors.As(err, &requestErr) {
 				args = append(args, "method", requestErr.method, "fqdn", requestErr.fqdn, "record_type", requestErr.recordType)
 			}
-			if attempt+1 < len(backoffs) {
+			if attempt+1 < len(backoffs) && !permanentDNSError(err) {
 				m.Logger.Warn("DNS update attempt failed", append(args, "retry_in", backoffs[attempt+1].String())...)
 			} else {
 				m.Logger.Error("DNS update attempt failed", args...)
 			}
+		}
+		if permanentDNSError(err) {
+			break
 		}
 	}
 
@@ -1133,48 +1208,81 @@ func (m *Manager) syncDNS(ctx context.Context, id, domain, publicIPv4 string) {
 	}
 }
 
-func (m *Manager) callDNSAPI(parent context.Context, domain, publicIPv4 string) error {
+func (m *Manager) callDNSAPI(parent context.Context, domain, publicIPv4 string) (bool, error) {
 	timeout := m.dnsTimeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	requests := []struct {
-		method, fqdn, recordType, value string
-	}{
-		{http.MethodPut, domain, "A", publicIPv4},
-		{http.MethodDelete, domain, "AAAA", ""},
-		{http.MethodDelete, "www." + domain, "A", ""},
-		{http.MethodDelete, "www." + domain, "AAAA", ""},
-		{http.MethodPut, "www." + domain, "CNAME", domain},
+	apex, err := m.getDNSRecord(ctx, domain, "A")
+	if err != nil {
+		return false, &dnsRequestError{http.MethodGet, domain, "A", err}
+	}
+	alias := "www." + domain
+	cname, err := m.getDNSRecord(ctx, alias, "CNAME")
+	if err != nil {
+		return false, &dnsRequestError{http.MethodGet, alias, "CNAME", err}
+	}
+	apexMatches := len(apex) == 1 && apex[0] == publicIPv4
+	cnameMatches := len(cname) == 1 && cname[0] == domain
+	if apexMatches && cnameMatches {
+		return false, nil
+	}
+	var requests []dnsRecordRequest
+	if !apexMatches {
+		requests = append(requests,
+			dnsRecordRequest{http.MethodPut, domain, "A", []string{publicIPv4}},
+			dnsRecordRequest{method: http.MethodDelete, fqdn: domain, recordType: "AAAA"},
+		)
+	}
+	if !cnameMatches {
+		requests = append(requests,
+			dnsRecordRequest{method: http.MethodDelete, fqdn: alias, recordType: "A"},
+			dnsRecordRequest{method: http.MethodDelete, fqdn: alias, recordType: "AAAA"},
+			dnsRecordRequest{http.MethodPut, alias, "CNAME", []string{domain}},
+		)
 	}
 	for _, request := range requests {
-		if err := m.callDNSRecord(ctx, request.method, request.fqdn, request.recordType, request.value); err != nil {
-			return &dnsRequestError{request.method, request.fqdn, request.recordType, err}
+		if _, err := m.callDNSRecord(ctx, request.method, request.fqdn, request.recordType, request.values); err != nil {
+			return true, &dnsRequestError{request.method, request.fqdn, request.recordType, err}
 		}
 	}
-	return nil
+	return true, nil
 }
 
-func (m *Manager) callDNSRecord(ctx context.Context, method, fqdn, recordType, value string) error {
+func (m *Manager) getDNSRecord(ctx context.Context, fqdn, recordType string) ([]string, error) {
+	body, err := m.callDNSRecord(ctx, http.MethodGet, fqdn, recordType, nil)
+	var responseErr *dnsHTTPError
+	if errors.As(err, &responseErr) && responseErr.statusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var record dnsRecordSet
+	if err := json.Unmarshal(body, &record); err != nil || record.Values == nil {
+		return nil, errors.New("WHMCS DNS API returned an invalid record set")
+	}
+	return record.Values, nil
+}
+
+func (m *Manager) callDNSRecord(ctx context.Context, method, fqdn, recordType string, values []string) ([]byte, error) {
 	endpoint, err := url.JoinPath(m.Config.DNS.Endpoint, "record", fqdn, recordType)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var body io.Reader
-	if value != "" {
-		encoded, err := json.Marshal(struct {
-			Values []string `json:"values"`
-		}{[]string{value}})
+	if values != nil {
+		encoded, err := json.Marshal(dnsRecordSet{Values: values})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(encoded)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Auth-Key", m.DNSKey)
 	if body != nil {
@@ -1186,17 +1294,126 @@ func (m *Manager) callDNSRecord(ctx context.Context, method, fqdn, recordType, v
 	}
 	response, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer response.Body.Close()
 	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		message := fmt.Sprintf("WHMCS DNS API returned %s", response.Status)
 		if detail := strings.TrimSpace(string(responseBody)); detail != "" {
-			return fmt.Errorf("WHMCS DNS API returned %s: %s", response.Status, detail)
+			message += ": " + detail
 		}
-		return fmt.Errorf("WHMCS DNS API returned %s", response.Status)
+		return nil, &dnsHTTPError{statusCode: response.StatusCode, message: message}
+	}
+	return responseBody, nil
+}
+
+func permanentDNSError(err error) bool {
+	var responseErr *dnsHTTPError
+	return errors.As(err, &responseErr) && (responseErr.statusCode == http.StatusForbidden || responseErr.statusCode == http.StatusNotFound)
+}
+
+func (m *Manager) dnsDelay(configured, fallback time.Duration) time.Duration {
+	if configured != 0 {
+		return configured
+	}
+	return fallback
+}
+
+func (m *Manager) prepareDNSForRouting(ctx context.Context, id, domain, publicIPv4 string) (bool, error) {
+	changed, err := m.callDNSAPI(ctx, domain, publicIPv4)
+	if err != nil && m.Logger != nil {
+		args := []any{"service_id", id, "domain", domain, "error", err, "permanent", permanentDNSError(err)}
+		var requestErr *dnsRequestError
+		if errors.As(err, &requestErr) {
+			args = append(args, "method", requestErr.method, "fqdn", requestErr.fqdn, "record_type", requestErr.recordType)
+		}
+		m.Logger.Warn("DNS pre-route attempt failed", args...)
+	}
+	if err != nil && permanentDNSError(err) {
+		return false, err
+	}
+	if changed || err != nil {
+		if waitErr := wait(ctx, m.dnsDelay(m.dnsPropagationDelay, 5*time.Second)); waitErr != nil {
+			return false, waitErr
+		}
+	}
+	return err != nil, err
+}
+
+func setDNSResult(service *model.Service, retry bool, err error) {
+	service.UpdatedAt = time.Now().UTC()
+	if err == nil {
+		service.DNSStatus, service.DNSLastError, service.DNSSyncedAt = "in_sync", "", service.UpdatedAt.Format(time.RFC3339Nano)
+	} else if retry {
+		service.DNSStatus, service.DNSLastError = "pending", err.Error()
+	} else {
+		service.DNSStatus, service.DNSLastError = "error", err.Error()
+	}
+}
+
+func (m *Manager) cleanupOldDNS(ctx context.Context, domain, publicIPv4 string) error {
+	timeout := m.dnsTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	values, err := m.getDNSRecord(ctx, domain, "A")
+	if err != nil {
+		return &dnsRequestError{http.MethodGet, domain, "A", err}
+	}
+	remaining := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != publicIPv4 {
+			remaining = append(remaining, value)
+		}
+	}
+	if len(remaining) != len(values) {
+		method := http.MethodPut
+		var body []string
+		if len(remaining) == 0 {
+			method = http.MethodDelete
+		} else {
+			body = remaining
+		}
+		if _, err := m.callDNSRecord(ctx, method, domain, "A", body); err != nil {
+			return &dnsRequestError{method, domain, "A", err}
+		}
+	}
+	alias := "www." + domain
+	cname, err := m.getDNSRecord(ctx, alias, "CNAME")
+	if err != nil {
+		return &dnsRequestError{http.MethodGet, alias, "CNAME", err}
+	}
+	if len(cname) > 0 {
+		if _, err := m.callDNSRecord(ctx, http.MethodDelete, alias, "CNAME", nil); err != nil {
+			return &dnsRequestError{http.MethodDelete, alias, "CNAME", err}
+		}
 	}
 	return nil
+}
+
+func (m *Manager) cleanupOldDNSAsync(id, domain, publicIPv4 string) {
+	go func() {
+		for attempt := 1; attempt <= 2; attempt++ {
+			err := m.cleanupOldDNS(m.backgroundContext(), domain, publicIPv4)
+			if err == nil {
+				return
+			}
+			permanent := permanentDNSError(err)
+			if m.Logger != nil {
+				args := []any{"service_id", id, "domain", domain, "attempt", attempt, "max_attempts", 2, "error", err, "permanent", permanent}
+				if attempt == 1 && !permanent {
+					args = append(args, "retry_in", m.dnsDelay(m.dnsCleanupDelay, 30*time.Second).String())
+				}
+				m.Logger.Warn("old DNS cleanup failed", args...)
+			}
+			if permanent || attempt == 2 || wait(m.backgroundContext(), m.dnsDelay(m.dnsCleanupDelay, 30*time.Second)) != nil {
+				return
+			}
+		}
+	}()
 }
 
 func (m *Manager) RecoverInterrupted() error {
