@@ -209,8 +209,12 @@ Updates are transactional as far as the filesystem and Caddy allow:
 1. Write and sync a temporary file in the service directory.
 2. Atomically rename it over the service file.
 3. Run `caddy.validate_command` directly, without a shell.
-4. On success, run `caddy.reload_command`.
-5. If validation or reload fails, restore the previous file (or remove the new
+4. For an active blue/green switch with an unchanged hostname map, use
+   `caddy.admin_url` to find every exact hostname and old-socket route, then
+   replace the containing route array with one ETag-guarded API request.
+5. If the admin URL is omitted, the live routes do not match exactly, or the
+   API request fails, run `caddy.reload_command`.
+6. If validation or reload fails, restore the previous file (or remove the new
    one), then validate/reload the restored configuration again.
 
 Removal follows the same rollback rule. Caddy status is derived from the file:

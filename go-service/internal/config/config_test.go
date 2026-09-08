@@ -51,6 +51,22 @@ func TestDockerPullTimeoutMustBePositive(t *testing.T) {
 	}
 }
 
+func TestCaddyAdminURLValidation(t *testing.T) {
+	config, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for value, valid := range map[string]bool{
+		"": true, "http://127.0.0.1:2019": true, "https://caddy.internal": true,
+		"127.0.0.1:2019": false, "file:///run/caddy.sock": false, "http://user@caddy:2019": false, "http://caddy:2019?x=1": false,
+	} {
+		config.Caddy.AdminURL = value
+		if err := config.Validate(); (err == nil) != valid {
+			t.Errorf("Validate() error for %q = %v, want valid %t", value, err, valid)
+		}
+	}
+}
+
 func TestDNSCanBeDisabledByOmittingSection(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join("..", "..", "config.example.toml"))
 	if err != nil {

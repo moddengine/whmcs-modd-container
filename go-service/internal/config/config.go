@@ -49,6 +49,7 @@ type Caddy struct {
 	ServiceConfigDir string   `toml:"service_config_dir"`
 	SuspensionRoot   string   `toml:"suspension_root"`
 	ActiveTemplate   string   `toml:"active_template"`
+	AdminURL         string   `toml:"admin_url"`
 	ValidateCommand  []string `toml:"validate_command"`
 	ReloadCommand    []string `toml:"reload_command"`
 }
@@ -184,6 +185,12 @@ func (c Config) Validate() error {
 	}
 	if c.Caddy.ActiveTemplate == "" {
 		return errors.New("caddy.active_template is required")
+	}
+	if c.Caddy.AdminURL != "" {
+		adminURL, err := url.ParseRequestURI(c.Caddy.AdminURL)
+		if err != nil || adminURL.Scheme != "http" && adminURL.Scheme != "https" || adminURL.Host == "" || adminURL.User != nil || adminURL.RawQuery != "" || adminURL.Fragment != "" {
+			return errors.New("caddy.admin_url must be an HTTP(S) URL without credentials, query, or fragment")
+		}
 	}
 	if c.Auth.BearerTokenFile == "" {
 		return errors.New("auth.bearer_token_file is required")
