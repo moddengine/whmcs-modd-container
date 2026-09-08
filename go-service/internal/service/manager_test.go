@@ -30,6 +30,12 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return fn(request) }
 
+type notifierFunc func(context.Context, string, bool, model.Service, string, string) error
+
+func (fn notifierFunc) Send(ctx context.Context, operation string, success bool, service model.Service, requestID, detail string) error {
+	return fn(ctx, operation, success, service, requestID, detail)
+}
+
 func testHTTPResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Status: fmt.Sprintf("%d %s", status, http.StatusText(status)), Body: io.NopCloser(strings.NewReader(body))}
 }
@@ -245,6 +251,106 @@ func TestRecoverInterruptedMarksDeferredWorkFailed(t *testing.T) {
 	tombstone, _ := repo.GetTombstone("whmcs-2")
 	if service.Phase != "failed" || tombstone.Phase != "failed" {
 		t.Fatalf("service=%q tombstone=%q", service.Phase, tombstone.Phase)
+	}
+}
+
+func TestBulkUpgradeMergeRetargetsOnlyQueuedItems(t *testing.T) {
+	job := model.BulkUpgradeJob{Items: []model.BulkUpgradeItem{
+		{ServiceID: "whmcs-1", Version: "v2", Status: "running"},
+		{ServiceID: "whmcs-2", Version: "v2", Status: "queued"},
+	}}
+	mergeBulkUpgradeItems(&job, model.BulkUpgradeRequest{ServiceIDs: []string{"whmcs-2", "whmcs-3", "whmcs-1"}, Version: "v3", ConfirmDowngrade: true})
+	if len(job.Items) != 4 || job.Items[0].Version != "v2" || job.Items[1].Version != "v3" ||
+		job.Items[2].ServiceID != "whmcs-3" || job.Items[3].ServiceID != "whmcs-1" || !job.Items[1].ConfirmDowngrade {
+		t.Fatalf("unexpected merged queue: %#v", job.Items)
+	}
+}
+
+func TestBulkUpgradeThirdFailureCancelsRemainingItems(t *testing.T) {
+	job := model.BulkUpgradeJob{
+		Status: "running", FailureCount: 2,
+		Items: []model.BulkUpgradeItem{{Status: "running"}, {Status: "queued"}, {Status: "succeeded"}},
+	}
+	manager := Manager{}
+	if !manager.finishBulkUpgradeItem(&job, 0, "unhealthy") || job.Status != "cancelled" || job.FailureCount != 3 ||
+		job.Items[0].Status != "failed" || job.Items[1].Status != "cancelled" || job.Items[2].Status != "succeeded" {
+		t.Fatalf("unexpected cancelled queue: %#v", job)
+	}
+}
+
+func TestBulkUpgradeRequeuesControllerInterruptedItem(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Put(model.Service{
+		ID: "whmcs-1", State: model.Active, Phase: "failed", Operation: "upgrade",
+		LastError: "controller restarted during deferred operation",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.PutBulkUpgrade(model.BulkUpgradeJob{
+		ID: "job-1", Status: "running", Items: []model.BulkUpgradeItem{{ServiceID: "whmcs-1", Version: "v2", Status: "running"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Repo: repo, Notify: notify.Disabled{}}
+	if !manager.runNextBulkUpgrade(t.Context()) {
+		t.Fatal("interrupted work was not made runnable")
+	}
+	job, err := repo.GetBulkUpgrade()
+	if err != nil || job.Items[0].Status != "queued" || job.FailureCount != 0 {
+		t.Fatalf("recovered queue = %#v, %v", job, err)
+	}
+}
+
+func TestBulkUpgradeWakeDoesNotDropConsecutiveSignals(t *testing.T) {
+	manager := Manager{bulkUpgradeWake: make(chan struct{})}
+	first := manager.bulkUpgradeWake
+	manager.mu.Lock()
+	manager.wakeBulkUpgradeLocked()
+	second := manager.bulkUpgradeWake
+	manager.wakeBulkUpgradeLocked()
+	manager.mu.Unlock()
+	for name, wake := range map[string]<-chan struct{}{"first": first, "second": second} {
+		select {
+		case <-wake:
+		default:
+			t.Fatalf("%s bulk upgrade wake was dropped", name)
+		}
+	}
+}
+
+func TestNotificationRequiresPersistedState(t *testing.T) {
+	root := t.TempDir()
+	services := filepath.Join(root, "services")
+	repo := state.New(services, filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	notified := make(chan struct{}, 1)
+	manager := Manager{Repo: repo, Notify: notifierFunc(func(context.Context, string, bool, model.Service, string, string) error {
+		notified <- struct{}{}
+		return nil
+	})}
+	manager.failSync(model.Service{ID: "whmcs-1", Operation: "upgrade"}, "request-1", errors.New("failed"))
+	select {
+	case <-notified:
+	case <-time.After(time.Second):
+		t.Fatal("persisted failure did not notify")
+	}
+	if err := os.RemoveAll(services); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(services, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager.failSync(model.Service{ID: "whmcs-1", Operation: "upgrade"}, "request-2", errors.New("failed again"))
+	select {
+	case <-notified:
+		t.Fatal("failed state persistence still notified")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

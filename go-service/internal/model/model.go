@@ -28,6 +28,30 @@ type UpgradeRequest struct {
 	ConfirmDowngrade bool   `json:"confirm_downgrade"`
 }
 
+type BulkUpgradeRequest struct {
+	ServiceIDs       []string `json:"service_ids"`
+	Version          string   `json:"version"`
+	ConfirmDowngrade bool     `json:"confirm_downgrade"`
+}
+
+type BulkUpgradeJob struct {
+	ID                 string            `toml:"id" json:"id"`
+	Status             string            `toml:"status" json:"status"`
+	FailureCount       int               `toml:"failure_count" json:"failure_count"`
+	CancellationReason string            `toml:"cancellation_reason,omitempty" json:"cancellation_reason,omitempty"`
+	CreatedAt          time.Time         `toml:"created_at" json:"created_at"`
+	UpdatedAt          time.Time         `toml:"updated_at" json:"updated_at"`
+	Items              []BulkUpgradeItem `toml:"items" json:"items"`
+}
+
+type BulkUpgradeItem struct {
+	ServiceID        string `toml:"service_id" json:"service_id"`
+	Version          string `toml:"version" json:"version"`
+	ConfirmDowngrade bool   `toml:"confirm_downgrade" json:"confirm_downgrade"`
+	Status           string `toml:"status" json:"status"`
+	Error            string `toml:"error,omitempty" json:"error,omitempty"`
+}
+
 type Service struct {
 	ID                  string            `toml:"id" json:"id"`
 	State               string            `toml:"state" json:"state"`

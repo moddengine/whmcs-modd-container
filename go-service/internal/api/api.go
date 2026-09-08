@@ -59,6 +59,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/image/pull", a.pullImageStatus)
 	mux.HandleFunc("POST /v1/image/pull", a.pullImage)
 	mux.HandleFunc("GET /v1/services", a.list)
+	mux.HandleFunc("GET /v1/bulk-upgrades/current", a.currentBulkUpgrade)
+	mux.HandleFunc("POST /v1/bulk-upgrades", a.queueBulkUpgrade)
 	mux.HandleFunc("PUT /v1/services/{id}", a.provision)
 	mux.HandleFunc("GET /v1/services/{id}", a.get)
 	mux.HandleFunc("POST /v1/services/{id}/suspend", a.suspend)
@@ -183,6 +185,29 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"services": services})
+}
+
+func (a *API) currentBulkUpgrade(w http.ResponseWriter, r *http.Request) {
+	job, err := a.Manager.CurrentBulkUpgrade()
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+func (a *API) queueBulkUpgrade(w http.ResponseWriter, r *http.Request) {
+	var request model.BulkUpgradeRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		a.writeError(w, r, &service.Error{Code: "invalid_request", Status: 400, Err: err})
+		return
+	}
+	job, err := a.Manager.QueueBulkUpgrade(r.Context(), request, requestID(r))
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
 }
 
 func (a *API) get(w http.ResponseWriter, r *http.Request) {

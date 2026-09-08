@@ -107,6 +107,44 @@ paths:
                     items: { $ref: "#/components/schemas/ServiceStatus" }
                 required: [services]
         "401": { $ref: "#/components/responses/Error" }
+  /v1/bulk-upgrades:
+    post:
+      summary: Create or merge a sequential bulk upgrade
+      description: The controller persists one queue, runs one service at a time, and cancels its remaining items after three total failures.
+      operationId: queueBulkUpgrade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkUpgradeRequest" }
+      responses:
+        "202":
+          description: Queue created or merged
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkUpgradeResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/bulk-upgrades/current:
+    get:
+      summary: Get the current or most recently completed bulk upgrade
+      operationId: getCurrentBulkUpgrade
+      responses:
+        "200":
+          description: A job is null until the first bulk upgrade is submitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job:
+                    oneOf:
+                      - { $ref: "#/components/schemas/BulkUpgradeJob" }
+                      - { type: "null" }
+                required: [job]
+        "401": { $ref: "#/components/responses/Error" }
   /v1/services/{id}:
     parameters:
       - $ref: "#/components/parameters/ServiceID"
@@ -303,6 +341,45 @@ components:
         version: { type: string, minLength: 1 }
         confirm_downgrade: { type: boolean, default: false }
       required: [version]
+    BulkUpgradeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        service_ids:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string, pattern: '^whmcs-[1-9][0-9]*$' }
+        version: { type: string, minLength: 1 }
+        confirm_downgrade: { type: boolean, default: false }
+      required: [service_ids, version]
+    BulkUpgradeItem:
+      type: object
+      properties:
+        service_id: { type: string }
+        version: { type: string }
+        confirm_downgrade: { type: boolean }
+        status: { type: string, enum: [queued, running, succeeded, failed, cancelled] }
+        error: { type: string }
+      required: [service_id, version, confirm_downgrade, status]
+    BulkUpgradeJob:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [running, completed, cancelled] }
+        failure_count: { type: integer, minimum: 0, maximum: 3 }
+        cancellation_reason: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/BulkUpgradeItem" }
+      required: [id, status, failure_count, created_at, updated_at, items]
+    BulkUpgradeResult:
+      type: object
+      properties:
+        job: { $ref: "#/components/schemas/BulkUpgradeJob" }
+      required: [job]
     ImageVersion:
       type: object
       properties:

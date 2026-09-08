@@ -40,8 +40,9 @@ var (
 )
 
 const (
-	maxPackageVariables  = 20
-	maxPackageValueChars = 250
+	maxPackageVariables    = 20
+	maxPackageValueChars   = 250
+	bulkUpgradeItemTimeout = 15 * time.Minute
 )
 
 type Error struct {
@@ -78,6 +79,7 @@ type Manager struct {
 	dnsPending               map[string]dnsUpdate
 	dnsActive                dnsUpdate
 	certificateWorkerStarted bool
+	bulkUpgradeWake          chan struct{}
 }
 
 type dnsUpdate struct {
@@ -701,6 +703,298 @@ func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeReque
 	return m.upgrade(ctx, id, req, requestID, "", "", "", nil, false)
 }
 
+func (m *Manager) QueueBulkUpgrade(ctx context.Context, req model.BulkUpgradeRequest, requestID string) (*model.BulkUpgradeJob, error) {
+	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
+		return nil, badRequest(err)
+	}
+	if len(req.ServiceIDs) == 0 {
+		return nil, badRequest(errors.New("select at least one service"))
+	}
+	available, err := m.Docker.HasVersion(ctx, req.Version)
+	if err != nil {
+		return nil, unavailable(err)
+	}
+	if !available {
+		return nil, notFound(errors.New("image version is not locally available"))
+	}
+	seen := make(map[string]bool, len(req.ServiceIDs))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range req.ServiceIDs {
+		if err := ValidateServiceID(id); err != nil {
+			return nil, badRequest(err)
+		}
+		if seen[id] {
+			return nil, badRequest(fmt.Errorf("service %s was selected more than once", id))
+		}
+		seen[id] = true
+		service, err := m.liveService(id)
+		if err != nil {
+			return nil, err
+		}
+		if service.State != model.Active {
+			return nil, conflict(fmt.Errorf("only active services can be upgraded: %s", id))
+		}
+		if comparison, ordered := dockeradapter.CompareVersions(req.Version, service.Version); (!ordered || comparison < 0) && !req.ConfirmDowngrade {
+			return nil, conflict(fmt.Errorf("possible downgrade for %s requires confirm_downgrade=true", id))
+		}
+	}
+
+	now := time.Now().UTC()
+	job, err := m.Repo.GetBulkUpgrade()
+	if errors.Is(err, state.ErrNotFound) || job.Status == "completed" || job.Status == "cancelled" {
+		job = model.BulkUpgradeJob{ID: requestID, Status: "running", CreatedAt: now}
+	} else if err != nil {
+		return nil, internal(err)
+	}
+	if job.ID == "" {
+		job.ID = fmt.Sprintf("bulk-%d", now.UnixNano())
+	}
+	mergeBulkUpgradeItems(&job, req)
+	job.UpdatedAt = now
+	if err := m.Repo.PutBulkUpgrade(job); err != nil {
+		return nil, internal(err)
+	}
+	m.wakeBulkUpgradeLocked()
+	return &job, nil
+}
+
+func (m *Manager) CurrentBulkUpgrade() (*model.BulkUpgradeJob, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, err := m.Repo.GetBulkUpgrade()
+	if errors.Is(err, state.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, internal(err)
+	}
+	return &job, nil
+}
+
+func (m *Manager) StartBulkUpgradeWorker() {
+	m.mu.Lock()
+	if m.bulkUpgradeWake != nil {
+		m.mu.Unlock()
+		return
+	}
+	m.bulkUpgradeWake = make(chan struct{})
+	m.mu.Unlock()
+	go m.runBulkUpgradeWorker()
+}
+
+func (m *Manager) wakeBulkUpgradeLocked() {
+	if m.bulkUpgradeWake == nil {
+		return
+	}
+	close(m.bulkUpgradeWake)
+	m.bulkUpgradeWake = make(chan struct{})
+}
+
+func (m *Manager) runBulkUpgradeWorker() {
+	ctx := m.backgroundContext()
+	for {
+		m.mu.Lock()
+		wake := m.bulkUpgradeWake
+		m.mu.Unlock()
+		for m.runNextBulkUpgrade(ctx) {
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		}
+	}
+}
+
+func (m *Manager) runNextBulkUpgrade(ctx context.Context) bool {
+	m.mu.Lock()
+	job, err := m.Repo.GetBulkUpgrade()
+	if errors.Is(err, state.ErrNotFound) || err == nil && job.Status != "running" {
+		m.mu.Unlock()
+		return false
+	}
+	if err != nil {
+		m.mu.Unlock()
+		m.logBulkUpgradeError("load bulk upgrade", err)
+		return false
+	}
+	for i := range job.Items {
+		if job.Items[i].Status != "running" {
+			continue
+		}
+		service, serviceErr := m.Repo.Get(job.Items[i].ServiceID)
+		if serviceErr == nil {
+			derive(&service)
+		}
+		switch {
+		case serviceErr == nil && service.Phase == "running" && service.Version == job.Items[i].Version:
+			m.finishBulkUpgradeItem(&job, i, "")
+		case serviceErr == nil && service.Phase == "failed" && service.LastError != "controller restarted during deferred operation" && service.LastError != context.Canceled.Error():
+			detail := service.LastError
+			if detail == "" {
+				detail = "upgrade failed"
+			}
+			cancelled := m.finishBulkUpgradeItem(&job, i, detail)
+			persistErr := m.Repo.PutBulkUpgrade(job)
+			m.mu.Unlock()
+			if persistErr != nil {
+				m.logBulkUpgradeError("recover bulk upgrade", persistErr)
+				return false
+			}
+			if cancelled {
+				m.notifyAsync("bulk-upgrade-cancelled", false, service, job.ID, job.CancellationReason)
+			}
+			return !cancelled
+		default:
+			job.Items[i].Status = "queued"
+			job.UpdatedAt = time.Now().UTC()
+		}
+		if err := m.Repo.PutBulkUpgrade(job); err != nil {
+			m.logBulkUpgradeError("recover bulk upgrade", err)
+			m.mu.Unlock()
+			return false
+		}
+		m.mu.Unlock()
+		return true
+	}
+	index := -1
+	for i := range job.Items {
+		if job.Items[i].Status == "queued" {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		job.Status, job.UpdatedAt = "completed", time.Now().UTC()
+		err := m.Repo.PutBulkUpgrade(job)
+		m.mu.Unlock()
+		if err != nil {
+			m.logBulkUpgradeError("complete bulk upgrade", err)
+		}
+		return false
+	}
+	item := job.Items[index]
+	job.Items[index].Status, job.Items[index].Error, job.UpdatedAt = "running", "", time.Now().UTC()
+	if err := m.Repo.PutBulkUpgrade(job); err != nil {
+		m.mu.Unlock()
+		m.logBulkUpgradeError("start bulk upgrade item", err)
+		return false
+	}
+	m.mu.Unlock()
+
+	_, _, upgradeErr := m.Upgrade(ctx, item.ServiceID, model.UpgradeRequest{Version: item.Version, ConfirmDowngrade: item.ConfirmDowngrade}, job.ID)
+	if upgradeErr == nil {
+		upgradeErr = m.waitForBulkUpgrade(ctx, item)
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	m.mu.Lock()
+	latest, err := m.Repo.GetBulkUpgrade()
+	if err != nil || index >= len(latest.Items) || latest.Items[index].Status != "running" {
+		m.mu.Unlock()
+		if err != nil {
+			m.logBulkUpgradeError("finish bulk upgrade item", err)
+		}
+		return false
+	}
+	detail := ""
+	if upgradeErr != nil {
+		detail = upgradeErr.Error()
+	}
+	cancelled := m.finishBulkUpgradeItem(&latest, index, detail)
+	err = m.Repo.PutBulkUpgrade(latest)
+	m.mu.Unlock()
+	if err != nil {
+		m.logBulkUpgradeError("persist bulk upgrade item", err)
+		return false
+	}
+	if cancelled {
+		service, _ := m.Repo.Get(item.ServiceID)
+		m.notifyAsync("bulk-upgrade-cancelled", false, service, latest.ID, latest.CancellationReason)
+		return false
+	}
+	return true
+}
+
+func (m *Manager) waitForBulkUpgrade(ctx context.Context, item model.BulkUpgradeItem) error {
+	itemCtx, cancel := context.WithTimeout(ctx, bulkUpgradeItemTimeout)
+	defer cancel()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		service, err := m.Repo.Get(item.ServiceID)
+		if err != nil {
+			return err
+		}
+		derive(&service)
+		if service.Phase == "running" {
+			if service.Version == item.Version {
+				return nil
+			}
+			return fmt.Errorf("service returned to version %s instead of %s", service.Version, item.Version)
+		}
+		if service.Phase == "failed" {
+			if service.LastError == "" {
+				return errors.New("upgrade failed")
+			}
+			return errors.New(service.LastError)
+		}
+		select {
+		case <-itemCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("bulk upgrade item timed out after %s: %w", bulkUpgradeItemTimeout, itemCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) finishBulkUpgradeItem(job *model.BulkUpgradeJob, index int, detail string) bool {
+	job.UpdatedAt = time.Now().UTC()
+	if detail == "" {
+		job.Items[index].Status, job.Items[index].Error = "succeeded", ""
+		return false
+	}
+	job.Items[index].Status, job.Items[index].Error = "failed", detail
+	job.FailureCount++
+	if job.FailureCount < 3 {
+		return false
+	}
+	job.Status = "cancelled"
+	job.CancellationReason = "cancelled after three failed upgrades; retry remaining services manually"
+	for i := range job.Items {
+		if job.Items[i].Status == "queued" {
+			job.Items[i].Status = "cancelled"
+		}
+	}
+	return true
+}
+
+func mergeBulkUpgradeItems(job *model.BulkUpgradeJob, req model.BulkUpgradeRequest) {
+	for _, id := range req.ServiceIDs {
+		updated := false
+		for i := range job.Items {
+			if job.Items[i].ServiceID == id && job.Items[i].Status == "queued" {
+				job.Items[i].Version, job.Items[i].ConfirmDowngrade, job.Items[i].Error = req.Version, req.ConfirmDowngrade, ""
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			job.Items = append(job.Items, model.BulkUpgradeItem{ServiceID: id, Version: req.Version, ConfirmDowngrade: req.ConfirmDowngrade, Status: "queued"})
+		}
+	}
+}
+
+func (m *Manager) logBulkUpgradeError(message string, err error) {
+	if m.Logger != nil {
+		m.Logger.Error(message, "error", err)
+	}
+}
+
 func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID, targetMainDomain, targetStagingDomain, targetPublicIPv4 string, targetPackage map[string]string, forceRedeploy bool) (*model.Status, bool, error) {
 	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
 		return nil, false, badRequest(err)
@@ -906,7 +1200,9 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 			return
 		}
 		setDNSResult(&service, retryDNS, dnsErr)
-		m.putDeferred(service)
+		if !m.putDeferred(service) {
+			return
+		}
 	}
 	if err := m.Caddy.Active(ctx, service.ID, routingDomains(service, operation), target, deploymentSocketName(service, target)); err != nil {
 		m.failDeferred(service, requestID, err)
@@ -926,7 +1222,9 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 			service.PublicIPv4, service.TargetPublicIPv4 = service.TargetPublicIPv4, ""
 		}
 		service.Phase, service.UpdatedAt = "draining", time.Now().UTC()
-		m.putDeferred(service)
+		if !m.putDeferred(service) {
+			return
+		}
 		cleanupCtx, cleanupCancel := m.operationContext(m.Config.Deployment.TrafficDrain + m.Config.Server.RequestTimeout)
 		err := cleanupOldDeploy(cleanupCtx, m.Config.Deployment.TrafficDrain, func(ctx context.Context) error {
 			return m.Docker.RemoveSlot(ctx, service.ID, service.LiveDeploy)
@@ -941,7 +1239,9 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 		service.State, service.LiveDeploy, service.Package = model.Active, target, service.TargetPackage
 	}
 	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.TargetPublicIPv4, service.TargetPackage, service.LastError, service.UpdatedAt = "running", "", "", "", "", "", "", nil, "", time.Now().UTC()
-	m.putDeferred(service)
+	if !m.putDeferred(service) {
+		return
+	}
 	if retryDNS {
 		m.enqueueDNS(service.ID, dnsDomain, dnsIPv4)
 	}
@@ -972,7 +1272,9 @@ func (m *Manager) finishRouting(id, operation, requestID string) {
 	for slot, deploy := range service.Deploy {
 		service.Deploy[slot] = withHealth(deploy, "unknown")
 	}
-	m.putDeferred(service)
+	if !m.putDeferred(service) {
+		return
+	}
 	m.notifyAsync(operation, true, service, requestID, "")
 }
 
@@ -981,16 +1283,16 @@ func (m *Manager) finishDelete(tombstone model.Tombstone, service model.Service,
 	defer cancel()
 	if err := m.Caddy.Remove(ctx, tombstone.ID); err != nil {
 		tombstone.Phase, tombstone.LastError, tombstone.UpdatedAt = "failed", err.Error(), time.Now().UTC()
-		m.mu.Lock()
-		_ = m.Repo.PutTombstone(tombstone)
-		m.mu.Unlock()
+		if !m.putTombstoneDeferred(tombstone) {
+			return
+		}
 		m.notifyAsync("delete", false, service, requestID, err.Error())
 		return
 	}
 	tombstone.Phase, tombstone.Operation, tombstone.LastError, tombstone.UpdatedAt = "deleted", "", "", time.Now().UTC()
-	m.mu.Lock()
-	_ = m.Repo.PutTombstone(tombstone)
-	m.mu.Unlock()
+	if !m.putTombstoneDeferred(tombstone) {
+		return
+	}
 	m.notifyAsync("delete", true, service, requestID, "")
 }
 
@@ -1010,18 +1312,35 @@ func (m *Manager) nextHealthAttempt(id string) uint64 {
 	return m.healthAttempts[id]
 }
 
-func (m *Manager) putDeferred(service model.Service) {
+func (m *Manager) putDeferred(service model.Service) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.Repo.Put(service); err != nil && m.Logger != nil {
-		m.Logger.Error("persist deferred state", "service_id", service.ID, "error", err)
+	if err := m.Repo.Put(service); err != nil {
+		if m.Logger != nil {
+			m.Logger.Error("persist deferred state", "service_id", service.ID, "error", err)
+		}
+		return false
 	}
+	return true
+}
+
+func (m *Manager) putTombstoneDeferred(tombstone model.Tombstone) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.Repo.PutTombstone(tombstone); err != nil {
+		if m.Logger != nil {
+			m.Logger.Error("persist deferred tombstone", "service_id", tombstone.ID, "error", err)
+		}
+		return false
+	}
+	return true
 }
 
 func (m *Manager) failSync(service model.Service, requestID string, operationErr error) {
 	service.Phase, service.LastError, service.UpdatedAt = "failed", operationErr.Error(), time.Now().UTC()
-	m.putDeferred(service)
-	m.notifyAsync(service.Operation, false, service, requestID, operationErr.Error())
+	if m.putDeferred(service) {
+		m.notifyAsync(service.Operation, false, service, requestID, operationErr.Error())
+	}
 }
 
 func (m *Manager) failDeferred(service model.Service, requestID string, operationErr error) {

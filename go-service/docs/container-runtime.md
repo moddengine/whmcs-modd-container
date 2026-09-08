@@ -346,11 +346,20 @@ live record or deleting tombstone as failed with:
 controller restarted during deferred operation
 ```
 
-The controller does not infer whether an interrupted external command or
-background step completed. This is deliberate: review Docker, Caddy, ZFS, and
-the record, then retry the recorded operation. Docker containers may still be
-running because their runtime and restart policy are independent of the
-controller process.
+Controller-side bulk upgrades are persisted in the state directory and run
+one service at a time. The next item starts only after the previous service
+returns to its requested version in phase=running. Each item has a 15-minute
+deadline. After a restart, the worker accepts an already-completed item,
+retries the interrupted item, and continues the queue. Real failures are
+retained and the third total failure cancels all remaining items and sends a
+Google Chat notification when enabled.
+Submit the affected services again to retry a cancelled queue.
+
+For lifecycle operations outside a bulk queue, the controller does not infer
+whether an interrupted external command or background step completed. Review
+Docker, Caddy, ZFS, and the record, then retry the recorded operation. Docker
+containers may still be running because their runtime and restart policy are
+independent of the controller process.
 
 Google Chat notification failures are logged as warnings and never change the
 lifecycle result.

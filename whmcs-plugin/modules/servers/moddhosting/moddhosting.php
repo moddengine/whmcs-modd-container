@@ -145,6 +145,9 @@ function moddhosting_AdminServicesTabFields(array $params): array
         $deployedStaging = (string) ($status['staging_domain'] ?? '');
         $hostnameStatus = moddhosting_hostname_status($requestedHost, $requestedStaging, $status);
         $defaultStaging = moddhosting_default_staging_label((string) ($params['domain'] ?? ''));
+        $autoRefresh = moddhosting_action_running($status)
+            ? ' <span class="text-muted">Refreshing every 3 seconds while the action runs.</span><script>setTimeout(function(){location.href=location.href;},3000);</script>'
+            : '';
         return [
             'Image Version' => '<input type="hidden" name="moddhosting_fields" value="1"><select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
             'Staging Hostname' => '<div class="input-group" style="max-width:500px"><input type="text" name="modulefields[1]" class="form-control" maxlength="32" value="'
@@ -159,7 +162,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
             'Disk Used' => number_format((int) ($status['dataset_used_bytes'] ?? 0)) . ' bytes',
             'Monthly Traffic' => number_format((int) ($status['metrics']['monthly_traffic_bytes'] ?? 0)) . ' bytes',
             'Email Sends' => number_format((int) ($status['metrics']['email_sends'] ?? 0)),
-            'Last Controller Check' => gmdate('c'),
+            'Last Controller Check' => gmdate('c') . $autoRefresh,
             'Controller Error' => moddhosting_escape((string) ($status['last_error'] ?? '')),
         ];
     } catch (\Throwable $error) {
@@ -460,17 +463,23 @@ function moddhosting_hostname_status(string $requestedHost, string $requestedSta
     $deployedHost = (string) ($status['main_domain'] ?? '');
     $inSync = $deployedHost !== '' && $requestedHost === $deployedHost
         && $requestedStaging === (string) ($status['staging_domain'] ?? '');
-    $busy = in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining'], true);
     if ($inSync) {
         return '<span class="text-success">&#10003; In sync</span>';
     }
-    if ($busy) {
-        return '<span class="text-warning">&#10007; Update in progress &mdash; refresh to confirm</span>';
+    if (moddhosting_action_running($status)) {
+        return '<span class="text-warning">&#10007; Update in progress</span>';
     }
     if ($deployedHost === '') {
         return '<span class="text-warning">&#10007; Not deployed &mdash; run Create or Deploy</span>';
     }
     return '<span class="text-warning">&#10007; Out of sync &mdash; click Deploy to update the live hostname</span>';
+}
+
+/** @param array<string, mixed> $status */
+function moddhosting_action_running(array $status): bool
+{
+    return ($status['dns_status'] ?? '') === 'pending'
+        || in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining', 'stopping', 'deleting'], true);
 }
 
 /** @param array<string, mixed> $status */

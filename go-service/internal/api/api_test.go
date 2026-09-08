@@ -4,9 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/moddengine/whmcs-container-controller/internal/model"
+	"github.com/moddengine/whmcs-container-controller/internal/service"
+	"github.com/moddengine/whmcs-container-controller/internal/state"
 )
 
 func TestImagePullStatus(t *testing.T) {
@@ -31,6 +36,34 @@ func TestImagePullStatus(t *testing.T) {
 	controller.pullImage(response, request)
 	if response.Code != http.StatusConflict {
 		t.Fatalf("concurrent pull returned HTTP %d", response.Code)
+	}
+}
+
+func TestCurrentBulkUpgrade(t *testing.T) {
+	root := t.TempDir()
+	repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	controller := &API{Manager: &service.Manager{Repo: repo}}
+	request := httptest.NewRequest(http.MethodGet, "/v1/bulk-upgrades/current", nil)
+	response := httptest.NewRecorder()
+	controller.currentBulkUpgrade(response, request)
+	var body map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil || body["job"] != nil {
+		t.Fatalf("empty bulk upgrade = %#v, %v", body, err)
+	}
+	if err := repo.PutBulkUpgrade(model.BulkUpgradeJob{ID: "job-1", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	controller.currentBulkUpgrade(response, request)
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := body["job"].(map[string]any)
+	if !ok || job["id"] != "job-1" {
+		t.Fatalf("current bulk upgrade = %#v", body)
 	}
 }
 

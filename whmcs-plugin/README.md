@@ -42,12 +42,17 @@ data. Permanent purging, upgrades, bulk upgrades, and status live in
 hostname, staging hostname, IP, and image version. An active service is recreated
 on the inactive blue/green slot even when its version is unchanged; a terminated
 service is restored with its retained data. Each configured controller has a
-named Services button; select active rows there to run a controller-local bulk upgrade.
+named Services button; filter or sort the rows, select active services, and
+submit a controller-local bulk upgrade. The controller persists the queue and
+upgrades one service at a time, including across controller restarts. It
+continues after two failures and cancels the remaining queue on the third.
 Paid package/configurable-option changes run the same blue/green redeployment.
 Resume always recreates the container with current package values. Editing only
 a product/group name or slug requires the service's manual **Deploy** action.
 The service page also shows the latest DNS status, error, and successful sync
 time; use **Reconnect DNS** there to queue the current domain and IP again.
+While a lifecycle action or DNS sync is running, the product/service page
+refreshes every three seconds and stops when the controller work finishes.
 
 Static analysis:
 

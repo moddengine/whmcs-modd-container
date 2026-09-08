@@ -316,87 +316,171 @@ function moddhosting_services_page(array $vars): void
 		if (($_POST['action'] ?? '') !== 'bulk-upgrade') {
 			throw new \InvalidArgumentException('Invalid services action.');
 		}
-		$version = trim((string) ($_POST['version'] ?? ''));
-		if (!in_array($version, array_column($versions, 'version'), true)) {
+		$targetVersion = trim((string) ($_POST['version'] ?? ''));
+		if (!in_array($targetVersion, array_column($versions, 'version'), true)) {
 			throw new \InvalidArgumentException('Select an image version available on this controller.');
 		}
-		$available = [];
+		$active = [];
 		foreach ($services as $service) {
 			if (($service['state'] ?? '') === 'active') {
-				$available[(string) ($service['id'] ?? '')] = true;
+				$active[(string) ($service['id'] ?? '')] = true;
 			}
 		}
 		$ids = [];
 		foreach ((array) ($_POST['services'] ?? []) as $id) {
-			if (is_string($id) && isset($available[$id])) {
+			if (is_string($id) && isset($active[$id]) && !in_array($id, $ids, true)) {
 				$ids[] = $id;
 			}
 		}
 		if ($ids === []) {
 			throw new \InvalidArgumentException('Select at least one active service.');
 		}
-		echo '<h2>Bulk upgrade results</h2><table class="table"><tbody>';
+		$client->request('POST', '/v1/bulk-upgrades', [
+			'service_ids' => $ids,
+			'version' => $targetVersion,
+			'confirm_downgrade' => isset($_POST['confirm_downgrade']),
+		]);
 		foreach ($ids as $id) {
-			try {
-				$client->request('POST', '/v1/services/' . rawurlencode($id) . '/upgrade', [
-					'version' => $version,
-					'confirm_downgrade' => isset($_POST['confirm_downgrade']),
-				]);
-				moddhosting_store_image_version($id, $version);
-				echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-success">Upgrade accepted</td></tr>';
-			} catch (\Throwable $error) {
-				echo '<tr><td>' . moddhosting_h($id) . '</td><td class="text-danger">' . moddhosting_h($error->getMessage()) . '</td></tr>';
-			}
+			moddhosting_store_image_version($id, $targetVersion);
 		}
-		echo '</tbody></table>';
+		echo '<div class="alert alert-success">Bulk upgrade queued on the controller.</div>';
 		$services = $client->request('GET', '/v1/services')['services'] ?? [];
 	}
-    $state = trim((string) ($_GET['state'] ?? ''));
-    $version = trim((string) ($_GET['version'] ?? ''));
-    $search = strtolower(trim((string) ($_GET['q'] ?? '')));
-    $services = array_filter($services, static function (array $service) use ($state, $version, $search): bool {
-        if ($state !== '' && ($service['state'] ?? '') !== $state) {
-            return false;
-        }
-        if ($version !== '' && ($service['version'] ?? '') !== $version) {
-            return false;
-        }
-        $haystack = strtolower(($service['id'] ?? '') . ' ' . ($service['main_domain'] ?? '') . ' ' . ($service['staging_domain'] ?? ''));
-        return $search === '' || str_contains($haystack, $search);
-    });
+
+	$status = trim((string) ($_GET['status'] ?? $_GET['state'] ?? ''));
+	$version = trim((string) ($_GET['version'] ?? ''));
+	$search = strtolower(trim((string) ($_GET['q'] ?? '')));
+	$sort = (string) ($_GET['sort'] ?? '');
+	$direction = ($_GET['dir'] ?? 'asc') === 'desc' ? 'desc' : 'asc';
+	$statuses = [];
+	$serviceVersions = [];
+	foreach ($services as $service) {
+		$statuses[] = (string) ($service['state'] ?? '');
+		$serviceVersions[] = (string) ($service['version'] ?? '');
+	}
+	$statuses = array_values(array_unique(array_filter($statuses, static fn(string $value): bool => $value !== '')));
+	$serviceVersions = array_values(array_unique(array_filter($serviceVersions, static fn(string $value): bool => $value !== '')));
+	sort($statuses, SORT_NATURAL | SORT_FLAG_CASE);
+	sort($serviceVersions, SORT_NATURAL | SORT_FLAG_CASE);
+	$services = array_values(array_filter($services, static function (array $service) use ($status, $version, $search): bool {
+		if ($status !== '' && ($service['state'] ?? '') !== $status) {
+			return false;
+		}
+		if ($version !== '' && ($service['version'] ?? '') !== $version) {
+			return false;
+		}
+		$haystack = strtolower(($service['id'] ?? '') . ' ' . ($service['main_domain'] ?? '') . ' ' . ($service['staging_domain'] ?? ''));
+		return $search === '' || str_contains($haystack, $search);
+	}));
+	moddhosting_sort_services($services, $sort, $direction);
+
 	$serverID = (int) $server->id;
-    echo '<h2>Services — ' . moddhosting_h(moddhosting_server_name($server)) . '</h2><form method="get" class="form-inline">'
-        . '<input type="hidden" name="module" value="moddhosting"><input type="hidden" name="page" value="services">'
+	$filters = ['server' => $serverID, 'q' => $search, 'status' => $status, 'version' => $version, 'sort' => $sort, 'dir' => $direction];
+	echo '<h2>Services — ' . moddhosting_h(moddhosting_server_name($server)) . '</h2><form method="get" class="form-inline">'
+		. '<input type="hidden" name="module" value="moddhosting"><input type="hidden" name="page" value="services">'
 		. '<input type="hidden" name="server" value="' . $serverID . '">'
-        . '<input class="form-control" name="q" placeholder="Domain or service ID" value="' . moddhosting_h($search) . '"> '
-        . '<input class="form-control" name="state" placeholder="State" value="' . moddhosting_h($state) . '"> '
-        . '<input class="form-control" name="version" placeholder="Version" value="' . moddhosting_h($version) . '"> '
-        . '<button class="btn btn-default">Filter</button></form>';
+		. '<input class="form-control" name="q" placeholder="Domain or service ID" value="' . moddhosting_h($search) . '"> '
+		. '<select class="form-control" name="status"><option value="">All statuses</option>';
+	foreach ($statuses as $option) {
+		echo '<option value="' . moddhosting_h($option) . '"' . ($option === $status ? ' selected' : '') . '>' . moddhosting_h($option) . '</option>';
+	}
+	echo '</select> <select class="form-control" name="version"><option value="">All versions</option>';
+	foreach ($serviceVersions as $option) {
+		echo '<option value="' . moddhosting_h($option) . '"' . ($option === $version ? ' selected' : '') . '>' . moddhosting_h($option) . '</option>';
+	}
+	echo '</select> <button class="btn btn-default">Filter</button></form>';
+
+	$job = $client->request('GET', '/v1/bulk-upgrades/current')['job'] ?? null;
+	if (is_array($job)) {
+		moddhosting_render_bulk_upgrade($job);
+	}
 	echo '<form method="post"><input type="hidden" name="token" value="' . moddhosting_h(generate_token('plain')) . '">'
 		. '<input type="hidden" name="action" value="bulk-upgrade">'
-		. '<table class="table table-striped"><thead><tr><th>Select</th><th>ID</th><th>Domains</th><th>State</th><th>Deploy</th><th>Version</th><th>Running</th><th>Disk</th><th>Email</th><th>Traffic</th><th>Updated</th></tr></thead><tbody>';
-    foreach ($services as $service) {
-        $id = (string) $service['id'];
-        $running = count(array_filter($service['containers'] ?? [], static fn(array $item): bool => !empty($item['running'])));
-        $url = $vars['modulelink'] . '&page=service&id=' . rawurlencode($id);
-		$checkbox = ($service['state'] ?? '') === 'active' ? '<input type="checkbox" name="services[]" value="' . moddhosting_h($id) . '" aria-label="Select ' . moddhosting_h($id) . '">' : '';
+		. '<table class="table table-striped"><thead><tr><th><input type="checkbox" class="moddhosting-select-all" aria-label="Select all active services"></th><th>ID</th>'
+		. '<th>' . moddhosting_sort_link($vars['modulelink'], 'Hostname', 'hostname', $filters) . '</th>'
+		. '<th>' . moddhosting_sort_link($vars['modulelink'], 'Status', 'status', $filters) . '</th><th>Deploy</th>'
+		. '<th>' . moddhosting_sort_link($vars['modulelink'], 'Version', 'version', $filters) . '</th><th>Running</th>'
+		. '<th>' . moddhosting_sort_link($vars['modulelink'], 'Storage Size', 'storage', $filters) . '</th><th>Email</th><th>Traffic</th><th>Updated</th></tr></thead>'
+		. '<tfoot><tr><th><input type="checkbox" class="moddhosting-select-all" aria-label="Select all active services"></th><th colspan="10">Select all active services</th></tr></tfoot><tbody>';
+	foreach ($services as $service) {
+		$id = (string) $service['id'];
+		$running = count(array_filter($service['containers'] ?? [], static fn(array $item): bool => !empty($item['running'])));
+		$url = $vars['modulelink'] . '&page=service&id=' . rawurlencode($id);
+		$checkbox = ($service['state'] ?? '') === 'active' ? '<input type="checkbox" class="moddhosting-service-select" name="services[]" value="' . moddhosting_h($id) . '" aria-label="Select ' . moddhosting_h($id) . '">' : '';
 		echo '<tr><td>' . $checkbox . '</td><td><a href="' . moddhosting_h($url) . '">' . moddhosting_h($id) . '</a></td>'
-            . '<td>' . moddhosting_h((string) ($service['main_domain'] ?? '')) . '<br><small>' . moddhosting_h((string) ($service['staging_domain'] ?? '')) . '</small></td>'
-            . '<td>' . moddhosting_h((string) ($service['state'] ?? '')) . '</td>'
-            . '<td>' . moddhosting_h((string) ($service['live_deploy'] ?? '')) . '</td>'
-            . '<td>' . moddhosting_h((string) ($service['version'] ?? '')) . '</td>'
-            . '<td>' . $running . '</td><td>' . number_format((int) ($service['dataset_used_bytes'] ?? 0)) . '</td>'
-            . '<td>' . number_format((int) ($service['metrics']['email_sends'] ?? 0)) . '</td>'
-            . '<td>' . number_format((int) ($service['metrics']['monthly_traffic_bytes'] ?? 0)) . '</td>'
-            . '<td>' . moddhosting_h((string) ($service['updated_at'] ?? '')) . '</td></tr>';
-    }
+			. '<td>' . moddhosting_h((string) ($service['main_domain'] ?? '')) . '<br><small>' . moddhosting_h((string) ($service['staging_domain'] ?? '')) . '</small></td>'
+			. '<td>' . moddhosting_h((string) ($service['state'] ?? '')) . '</td>'
+			. '<td>' . moddhosting_h((string) ($service['live_deploy'] ?? '')) . '</td>'
+			. '<td>' . moddhosting_h((string) ($service['version'] ?? '')) . '</td>'
+			. '<td>' . $running . '</td><td>' . number_format((int) ($service['dataset_used_bytes'] ?? 0)) . '</td>'
+			. '<td>' . number_format((int) ($service['metrics']['email_sends'] ?? 0)) . '</td>'
+			. '<td>' . number_format((int) ($service['metrics']['monthly_traffic_bytes'] ?? 0)) . '</td>'
+			. '<td>' . moddhosting_h((string) ($service['updated_at'] ?? '')) . '</td></tr>';
+	}
 	echo '</tbody></table><fieldset><legend>Upgrade selected services</legend><label>Target version <select name="version" class="form-control" required>';
-	foreach ($versions as $version) {
-		$tag = (string) ($version['version'] ?? '');
+	foreach ($versions as $availableVersion) {
+		$tag = (string) ($availableVersion['version'] ?? '');
 		echo '<option value="' . moddhosting_h($tag) . '">' . moddhosting_h($tag) . '</option>';
 	}
-	echo '</select></label><label><input type="checkbox" name="confirm_downgrade"> Confirm possible downgrades</label><br>'
-		. '<button class="btn btn-primary">Upgrade selected</button></fieldset></form>';
+	echo '</select></label> <label><input type="checkbox" name="confirm_downgrade"> Confirm possible downgrades</label><br>'
+		. '<button class="btn btn-primary">Upgrade selected</button></fieldset></form>'
+		. '<script>(function(){var masters=[].slice.call(document.querySelectorAll(".moddhosting-select-all"));var boxes=[].slice.call(document.querySelectorAll(".moddhosting-service-select"));function sync(){var checked=boxes.filter(function(box){return box.checked;}).length;masters.forEach(function(master){master.checked=boxes.length>0&&checked===boxes.length;master.indeterminate=checked>0&&checked<boxes.length;master.disabled=boxes.length===0;});}masters.forEach(function(master){master.addEventListener("change",function(){boxes.forEach(function(box){box.checked=master.checked;});sync();});});boxes.forEach(function(box){box.addEventListener("change",sync);});sync();}());</script>';
+	if (is_array($job) && ($job['status'] ?? '') === 'running') {
+		$refresh = $vars['modulelink'] . '&page=services&' . http_build_query(array_filter($filters, static fn(mixed $value): bool => $value !== ''));
+		echo '<script>setTimeout(function(){if(!document.querySelector(".moddhosting-service-select:checked")){location.href=' . json_encode($refresh, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) . ';}},3000);</script>';
+	}
+}
+
+/** @param list<array<string, mixed>> $services */
+function moddhosting_sort_services(array &$services, string $sort, string $direction): void
+{
+	if (!in_array($sort, ['hostname', 'version', 'storage', 'status'], true)) {
+		return;
+	}
+	usort($services, static function (array $left, array $right) use ($sort, $direction): int {
+		if ($sort === 'storage') {
+			$comparison = ((int) ($left['dataset_used_bytes'] ?? 0)) <=> ((int) ($right['dataset_used_bytes'] ?? 0));
+		} else {
+			$key = ['hostname' => 'main_domain', 'version' => 'version', 'status' => 'state'][$sort];
+			$comparison = strnatcasecmp((string) ($left[$key] ?? ''), (string) ($right[$key] ?? ''));
+		}
+		if ($comparison === 0) {
+			$comparison = strnatcasecmp((string) ($left['id'] ?? ''), (string) ($right['id'] ?? ''));
+		}
+		return $direction === 'desc' ? -$comparison : $comparison;
+	});
+}
+
+/** @param array<string, int|string> $filters */
+function moddhosting_sort_link(string $moduleLink, string $label, string $column, array $filters): string
+{
+	$current = (string) ($filters['sort'] ?? '');
+	$currentDirection = (string) ($filters['dir'] ?? 'asc');
+	$filters['sort'] = $column;
+	$filters['dir'] = $current === $column && $currentDirection === 'asc' ? 'desc' : 'asc';
+	$url = $moduleLink . '&page=services&' . http_build_query(array_filter($filters, static fn(mixed $value): bool => $value !== ''));
+	$arrow = $current === $column ? ($currentDirection === 'asc' ? ' ▲' : ' ▼') : '';
+	return '<a href="' . moddhosting_h($url) . '">' . moddhosting_h($label . $arrow) . '</a>';
+}
+
+/** @param array<string, mixed> $job */
+function moddhosting_render_bulk_upgrade(array $job): void
+{
+	echo '<h3>Bulk upgrade — ' . moddhosting_h((string) ($job['status'] ?? 'unknown')) . '</h3><p>Failures: ' . (int) ($job['failure_count'] ?? 0) . ' / 3';
+	if (($job['cancellation_reason'] ?? '') !== '') {
+		echo ' — ' . moddhosting_h((string) $job['cancellation_reason']);
+	}
+	echo '</p><table class="table"><thead><tr><th>Service</th><th>Target</th><th>Status</th><th>Error</th></tr></thead><tbody>';
+	foreach ((array) ($job['items'] ?? []) as $item) {
+		if (!is_array($item)) {
+			continue;
+		}
+		$itemStatus = (string) ($item['status'] ?? 'unknown');
+		$class = $itemStatus === 'succeeded' ? 'text-success' : (in_array($itemStatus, ['failed', 'cancelled'], true) ? 'text-danger' : '');
+		echo '<tr><td>' . moddhosting_h((string) ($item['service_id'] ?? '')) . '</td><td>' . moddhosting_h((string) ($item['version'] ?? ''))
+			. '</td><td class="' . $class . '">' . moddhosting_h($itemStatus) . '</td><td>' . moddhosting_h((string) ($item['error'] ?? '')) . '</td></tr>';
+	}
+	echo '</tbody></table>';
 }
 
 /** @param array<string, mixed> $vars */

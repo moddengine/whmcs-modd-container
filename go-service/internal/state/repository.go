@@ -18,12 +18,13 @@ var ErrNotFound = errors.New("service not found")
 type Repository struct {
 	servicesDir   string
 	tombstonesDir string
+	bulkUpgrade   string
 	// ponytail: one lock is enough for an MVP controller; use keyed locks if write contention becomes measurable.
 	mu sync.Mutex
 }
 
 func New(servicesDir, tombstonesDir string) *Repository {
-	return &Repository{servicesDir: servicesDir, tombstonesDir: tombstonesDir}
+	return &Repository{servicesDir: servicesDir, tombstonesDir: tombstonesDir, bulkUpgrade: filepath.Join(servicesDir, ".bulk-upgrade")}
 }
 
 func (r *Repository) Init() error {
@@ -143,6 +144,28 @@ func (r *Repository) ListTombstones() ([]model.Tombstone, error) {
 		result = append(result, item)
 	}
 	return result, nil
+}
+
+func (r *Repository) GetBulkUpgrade() (model.BulkUpgradeJob, error) {
+	var job model.BulkUpgradeJob
+	b, err := os.ReadFile(r.bulkUpgrade)
+	if errors.Is(err, os.ErrNotExist) {
+		return job, ErrNotFound
+	}
+	if err != nil {
+		return job, err
+	}
+	return job, toml.Unmarshal(b, &job)
+}
+
+func (r *Repository) PutBulkUpgrade(job model.BulkUpgradeJob) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, err := toml.Marshal(job)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(r.bulkUpgrade, b, false)
 }
 
 func (r *Repository) servicePath(id string) string { return filepath.Join(r.servicesDir, id+".toml") }

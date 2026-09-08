@@ -423,10 +423,12 @@ Allow an administrator to:
 - Review current versions.
 - Confirm upgrades.
 - Explicitly confirm any selected downgrades.
-- Execute operations sequentially or with a small configured concurrency limit.
+- Execute operations sequentially in a durable controller queue.
 - Display success/failure per service.
 
-Bulk execution should call the same per-service upgrade endpoint and should not introduce a separate bulk controller endpoint for MVP.
+The bulk controller endpoint persists and merges queue entries, while its
+worker reuses the same per-service upgrade implementation. It resumes after a
+controller restart and cancels the remaining queue after three total failures.
 
 - No container logs.
 - No arbitrary file selection.

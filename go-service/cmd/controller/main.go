@@ -113,6 +113,7 @@ func main() {
 	if err := manager.RecoverInterrupted(); err != nil {
 		fatal(fmt.Errorf("recover interrupted operations: %w", err))
 	}
+	manager.StartBulkUpgradeWorker()
 	manager.StartCertificateWorker()
 	handler := (&api.API{
 		Manager: manager, Config: cfg, Context: controllerContext, Token: token, Logger: logger,

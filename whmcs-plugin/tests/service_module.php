@@ -62,6 +62,13 @@ assert(str_contains(moddhosting_hostname_status('example.com', '', ['phase' => '
 assert(str_contains(moddhosting_hostname_status('example.com', '', []), 'Not deployed'));
 assert(str_contains(moddhosting_hostname_status('example.com', '', ['main_domain' => 'old.example.com']), 'Out of sync'));
 
+foreach (['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining', 'stopping', 'deleting'] as $phase) {
+    assert(moddhosting_action_running(['phase' => $phase]));
+}
+assert(moddhosting_action_running(['phase' => 'running', 'dns_status' => 'pending']));
+assert(!moddhosting_action_running(['phase' => 'running']));
+assert(!moddhosting_action_running(['phase' => 'failed']));
+
 assert(moddhosting_dns_summary([]) === 'not provisioned (No Errors) Last Synced: never');
 assert(str_contains(moddhosting_dns_summary(['dns_status' => 'in_sync']), 'In sync</span> (No Errors) Last Synced: never'));
 assert(str_contains(moddhosting_dns_summary(['dns_status' => 'pending']), 'Pending</span> (No Errors)'));

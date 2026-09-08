@@ -37,3 +37,26 @@ func TestRepositoryRoundTripAndBackup(t *testing.T) {
 		t.Fatal("previous service file was not backed up")
 	}
 }
+
+func TestBulkUpgradeRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	repo := New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+	if err := repo.Init(); err != nil {
+		t.Fatal(err)
+	}
+	job := model.BulkUpgradeJob{
+		ID: "request-1", Status: "running", FailureCount: 1, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Items: []model.BulkUpgradeItem{{ServiceID: "whmcs-123", Version: "v2", Status: "queued"}},
+	}
+	if err := repo.PutBulkUpgrade(job); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.GetBulkUpgrade()
+	if err != nil || got.ID != job.ID || len(got.Items) != 1 || got.Items[0].Version != "v2" {
+		t.Fatalf("GetBulkUpgrade() = %#v, %v", got, err)
+	}
+	services, err := repo.List()
+	if err != nil || len(services) != 0 {
+		t.Fatalf("bulk upgrade was treated as a service: %#v, %v", services, err)
+	}
+}
