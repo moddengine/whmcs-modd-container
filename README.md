@@ -154,6 +154,7 @@ pool's snapshot and replication policy.
 | `caddy.service_config_dir` | Host directory for generated service Caddyfiles and hostname-to-socket map fragments. |
 | `caddy.suspension_root` | Directory containing the shared `index.html`. |
 | `caddy.active_template` | Active service Caddyfile template, repeated per domain; supports `{domain}`, `{service_id}`, `{slot}`, and `{socket_name}`. |
+| `caddy.admin_url` | Optional Caddy admin API URL used to switch an existing blue/green route without reloading. |
 | `caddy.validate_command` | Argument array run after a service-file change. |
 | `caddy.reload_command` | Argument array run after successful validation. |
 
@@ -161,6 +162,13 @@ Commands are executed directly, without a shell. Keep each executable and
 argument as a separate TOML array item. The example commands validate and
 reload a Caddy container named `caddy`. Change the container name or config
 path if your Caddy deployment differs.
+
+When `caddy.admin_url` is set, an active deployment with the same hostname map
+is switched through Caddy's admin API after validation. Missing or ambiguous
+routes and API failures fall back to `caddy.reload_command`. Keep the admin
+endpoint restricted to the controller; the example URL requires the Caddy
+container's admin listener to be published on host loopback. Omit the setting
+to always reload.
 
 The master Caddyfile is operator-owned; the controller only creates files in
 `service_config_dir`.

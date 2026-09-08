@@ -17,6 +17,7 @@ tombstones_dir = "/var/lib/modd-hosting/tombstones"
 [caddy]
 service_config_dir = "/var/lib/modd-hosting/caddy/services"
 suspension_root = "/srv/modd-suspended"
+admin_url = "http://127.0.0.1:2019"
 active_template = """
 {domain} {
   reverse_proxy unix//run/whmcs/{service_id}-{slot}/{socket_name}
