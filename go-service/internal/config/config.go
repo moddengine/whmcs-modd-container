@@ -182,8 +182,8 @@ func (c Config) Validate() error {
 			return errors.New("dns.key_file must be absolute")
 		}
 	}
-	if c.Caddy.ActiveTemplate == "" {
-		return errors.New("caddy.active_template is required")
+	if !strings.Contains(c.Caddy.ActiveTemplate, "{hostnames}") {
+		return errors.New("caddy.active_template must contain {hostnames}")
 	}
 	if c.Auth.BearerTokenFile == "" {
 		return errors.New("auth.bearer_token_file is required")

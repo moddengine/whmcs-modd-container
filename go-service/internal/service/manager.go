@@ -435,10 +435,7 @@ func (m *Manager) deployDomains(ctx context.Context, id, mainDomain, stagingDoma
 		}
 	}
 	if domainsChanged {
-		updatedDomains := []string{mainDomain}
-		if stagingDomain != "" {
-			updatedDomains = append(updatedDomains, stagingDomain)
-		}
+		updatedDomains := domains(model.Service{MainDomain: mainDomain, StagingDomain: stagingDomain})
 		if err := apply(ctx, id, updatedDomains, service.LiveDeploy); err != nil {
 			return service, unprocessable("hostname_change_failed", err)
 		}
@@ -2177,7 +2174,7 @@ func deploymentSocketName(service model.Service, slot string) string {
 }
 
 func domains(service model.Service) []string {
-	domains := []string{service.MainDomain}
+	domains := []string{service.MainDomain, "www." + service.MainDomain}
 	if service.StagingDomain != "" {
 		domains = append(domains, service.StagingDomain)
 	}

@@ -26,19 +26,18 @@ func (a Adapter) Path(id string) string { return filepath.Join(a.Dir, id+".caddy
 func (a Adapter) mapPath(id string) string { return filepath.Join(a.Dir, id+".map") }
 
 func (a Adapter) Active(ctx context.Context, id string, domains []string, slot, socketName string) error {
-	var content strings.Builder
 	var mapping strings.Builder
 	socket := a.Socket(id, slot, socketName)
+	content := strings.NewReplacer(
+		"{hostnames}", strings.Join(domains, ", "),
+		"{service_id}", id,
+		"{slot}", slot,
+		"{socket_name}", socketName,
+	).Replace(a.ActiveTemplate)
 	for _, domain := range domains {
-		content.WriteString(strings.NewReplacer(
-			"{domain}", domain,
-			"{service_id}", id,
-			"{slot}", slot,
-			"{socket_name}", socketName,
-		).Replace(a.ActiveTemplate))
 		fmt.Fprintf(&mapping, "%s %s\n", domain, socket)
 	}
-	return a.replace(ctx, id, content.String(), mapping.String())
+	return a.replace(ctx, id, content, mapping.String())
 }
 
 func (a Adapter) Socket(id, slot, socketName string) string {

@@ -21,6 +21,20 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
+func TestActiveTemplateRequiresHostnames(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "controller.toml")
+	if err := os.WriteFile(path, []byte(strings.Replace(string(content), "{hostnames}", "{domain}", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "{hostnames}") {
+		t.Fatalf("legacy active template error = %v", err)
+	}
+}
+
 func TestDockerPullTimeoutDefaultsWhenOmitted(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join("..", "..", "config.example.toml"))
 	if err != nil {

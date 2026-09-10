@@ -145,25 +145,24 @@ function moddhosting_AdminServicesTabFields(array $params): array
         $deployedStaging = (string) ($status['staging_domain'] ?? '');
         $hostnameStatus = moddhosting_hostname_status($requestedHost, $requestedStaging, $status);
         $defaultStaging = moddhosting_default_staging_label((string) ($params['domain'] ?? ''));
-        $autoRefresh = moddhosting_action_running($status)
-            ? ' <span class="text-muted">Refreshing every 3 seconds while the action runs.</span><script>setTimeout(function(){location.href=location.href;},3000);</script>'
-            : '';
+        $field = static fn(string $name, string $value): string => '<span data-moddhosting-status="' . $name . '">' . $value . '</span>';
+        $autoRefresh = moddhosting_action_running($status) ? moddhosting_status_refresh_script() : '';
         return [
             'Image Version' => '<input type="hidden" name="moddhosting_fields" value="1"><select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
             'Staging Hostname' => '<div class="input-group" style="max-width:500px"><input type="text" name="modulefields[1]" class="form-control" maxlength="32" value="'
                 . moddhosting_escape($stagingLabel) . '" placeholder="Blank to disable staging"><span class="input-group-addon">.'
                 . moddhosting_escape($stagingSuffix) . '</span><span class="input-group-btn"><button type="button" class="btn btn-default" data-staging-label="'
                 . moddhosting_escape($defaultStaging) . '" onclick="this.closest(\'.input-group\').querySelector(\'input\').value=this.dataset.stagingLabel">Default</button></span></div>',
-            'Hostname' => moddhosting_hostname_summary($deployedHost, $deployedStaging, $hostnameStatus),
-            'DNS Status' => moddhosting_dns_summary($status),
-            'Controller State' => moddhosting_escape((string) ($status['state'] ?? 'unknown')),
-            'Deployed Version' => moddhosting_escape((string) ($status['version'] ?? 'not provisioned')),
-            'Live Deploy' => moddhosting_escape((string) ($status['live_deploy'] ?? 'unknown')),
-            'Disk Used' => number_format((int) ($status['dataset_used_bytes'] ?? 0)) . ' bytes',
-            'Monthly Traffic' => number_format((int) ($status['metrics']['monthly_traffic_bytes'] ?? 0)) . ' bytes',
-            'Email Sends' => number_format((int) ($status['metrics']['email_sends'] ?? 0)),
-            'Last Controller Check' => gmdate('c') . $autoRefresh,
-            'Controller Error' => moddhosting_escape((string) ($status['last_error'] ?? '')),
+            'Hostname' => $field('hostname', moddhosting_hostname_summary($deployedHost, $deployedStaging, $hostnameStatus)),
+            'DNS Status' => $field('dns', moddhosting_dns_summary($status)),
+            'Controller State' => $field('state', moddhosting_escape((string) ($status['state'] ?? 'unknown'))),
+            'Deployed Version' => $field('version', moddhosting_escape((string) ($status['version'] ?? 'not provisioned'))),
+            'Live Deploy' => $field('deploy', moddhosting_escape((string) ($status['live_deploy'] ?? 'unknown'))),
+            'Disk Used' => $field('disk', number_format((int) ($status['dataset_used_bytes'] ?? 0)) . ' bytes'),
+            'Monthly Traffic' => $field('traffic', number_format((int) ($status['metrics']['monthly_traffic_bytes'] ?? 0)) . ' bytes'),
+            'Email Sends' => $field('email', number_format((int) ($status['metrics']['email_sends'] ?? 0))),
+            'Last Controller Check' => $field('checked', gmdate('c') . $autoRefresh),
+            'Controller Error' => $field('error', moddhosting_escape((string) ($status['last_error'] ?? ''))),
         ];
     } catch (\Throwable $error) {
         return ['Controller Error' => moddhosting_escape($error->getMessage())];
@@ -480,6 +479,11 @@ function moddhosting_action_running(array $status): bool
 {
     return ($status['dns_status'] ?? '') === 'pending'
         || in_array((string) ($status['phase'] ?? ''), ['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining', 'stopping', 'deleting'], true);
+}
+
+function moddhosting_status_refresh_script(): string
+{
+    return ' <span class="text-muted" data-moddhosting-refresh>Refreshing every 3 seconds while the action runs.</span><script>(function(){function schedule(){setTimeout(refresh,3000);}function refresh(){var request=new XMLHttpRequest();var url=new URL(location.href);url.searchParams.set("_moddhosting_status",Date.now());request.open("GET",url);request.timeout=10000;request.onload=function(){if(request.status<200||request.status>=300){schedule();return;}var page=new DOMParser().parseFromString(request.responseText,"text/html");var values={};[].forEach.call(page.querySelectorAll("[data-moddhosting-status]"),function(node){values[node.dataset.moddhostingStatus]=node.innerHTML;});[].forEach.call(document.querySelectorAll("[data-moddhosting-status]"),function(node){var value=values[node.dataset.moddhostingStatus];if(value!==undefined){node.innerHTML=value;}});if(page.querySelector("[data-moddhosting-refresh]")){schedule();}};request.onerror=request.ontimeout=schedule;request.send();}schedule();}());</script>';
 }
 
 /** @param array<string, mixed> $status */

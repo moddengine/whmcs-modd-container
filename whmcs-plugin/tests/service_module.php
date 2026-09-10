@@ -68,6 +68,10 @@ foreach (['provisioning', 'starting', 'waiting_for_health', 'routing', 'draining
 assert(moddhosting_action_running(['phase' => 'running', 'dns_status' => 'pending']));
 assert(!moddhosting_action_running(['phase' => 'running']));
 assert(!moddhosting_action_running(['phase' => 'failed']));
+$refreshScript = moddhosting_status_refresh_script();
+assert(str_contains($refreshScript, 'new XMLHttpRequest()'));
+assert(str_contains($refreshScript, 'data-moddhosting-status'));
+assert(!str_contains($refreshScript, 'location.href=location.href'));
 
 assert(moddhosting_dns_summary([]) === 'not provisioned (No Errors) Last Synced: never');
 assert(str_contains(moddhosting_dns_summary(['dns_status' => 'in_sync']), 'In sync</span> (No Errors) Last Synced: never'));

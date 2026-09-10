@@ -12,7 +12,7 @@ func TestRenderAndStatus(t *testing.T) {
 	dir := t.TempDir()
 	adapter := Adapter{
 		Dir: dir, SuspensionRoot: "/srv/suspended",
-		ActiveTemplate:  "{domain} {\n  reverse_proxy unix//modd/http/{service_id}-{slot}/{socket_name}\n}\n",
+		ActiveTemplate:  "{hostnames} {\n  reverse_proxy unix//modd/http/{service_id}-{slot}/{socket_name}\n}\n",
 		ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"},
 	}
 	socket := "/modd/http/whmcs-123-blue/http.sock"
@@ -24,7 +24,7 @@ func TestRenderAndStatus(t *testing.T) {
 		t.Fatalf("Status() = %v, %q, %q, %v", configured, mode, gotSocket, err)
 	}
 	content, _ := os.ReadFile(filepath.Join(dir, "whmcs-123.caddy"))
-	if got, want := string(content), "example.com {\n  reverse_proxy unix//modd/http/whmcs-123-blue/http.sock\n}\nexample-com.staging.com {\n  reverse_proxy unix//modd/http/whmcs-123-blue/http.sock\n}\n"; got != want {
+	if got, want := string(content), "example.com, example-com.staging.com {\n  reverse_proxy unix//modd/http/whmcs-123-blue/http.sock\n}\n"; got != want {
 		t.Fatalf("rendered config = %q, want %q", got, want)
 	}
 	if strings.Contains(string(content), "import") {
@@ -49,7 +49,7 @@ func TestRenderAndStatus(t *testing.T) {
 }
 
 func TestHardcodedSocketNameRemainsSupported(t *testing.T) {
-	adapter := Adapter{ActiveTemplate: "{domain} { reverse_proxy unix//run/{service_id}-{slot}/http.sock }"}
+	adapter := Adapter{ActiveTemplate: "{hostnames} { reverse_proxy unix//run/{service_id}-{slot}/http.sock }"}
 	if got := adapter.Socket("whmcs-123", "blue", "nginx.sock"); got != "/run/whmcs-123-blue/http.sock" {
 		t.Fatalf("hardcoded socket changed: %q", got)
 	}

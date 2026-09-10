@@ -48,7 +48,7 @@ func TestDeployDomainsReplacesRoutesAndPersistsState(t *testing.T) {
 	}
 	adapter := caddy.Adapter{
 		Dir: filepath.Join(root, "caddy"), SuspensionRoot: "/srv/suspended",
-		ActiveTemplate:  "{domain} {\n  reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
+		ActiveTemplate:  "{hostnames} {\n  reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
 		ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"},
 	}
 	service := model.Service{
@@ -70,8 +70,12 @@ func TestDeployDomainsReplacesRoutesAndPersistsState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.MainDomain != "new.example.com" || !strings.Contains(string(content), "new.example.com") || strings.Contains(string(content), "old.example.com") {
+	if updated.MainDomain != "new.example.com" || !strings.Contains(string(content), "new.example.com, www.new.example.com, new-example-com.staging.test") || strings.Contains(string(content), "www.new-example-com.staging.test") || strings.Contains(string(content), "old.example.com") {
 		t.Fatalf("hostname was not reconciled: service=%#v caddy=%q", updated, content)
+	}
+	mapping, err := os.ReadFile(filepath.Join(root, "caddy", service.ID+".map"))
+	if err != nil || string(mapping) != "new.example.com /run/whmcs-123-blue.sock\nwww.new.example.com /run/whmcs-123-blue.sock\nnew-example-com.staging.test /run/whmcs-123-blue.sock\n" {
+		t.Fatalf("hostname map = %q, %v", mapping, err)
 	}
 	persisted, err := repo.Get(service.ID)
 	if err != nil || persisted.MainDomain != updated.MainDomain || persisted.StagingDomain != updated.StagingDomain {
@@ -86,7 +90,7 @@ func TestDeployDomainsCleansOldDNSAfterCaddy(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := caddy.Adapter{
-		Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
+		Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{hostnames} {\n reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
 		ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"},
 	}
 	service := model.Service{
@@ -139,7 +143,7 @@ func TestDeployDomainsRollsBackFailedCaddyReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := caddy.Adapter{
-		Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n  reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
+		Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{hostnames} {\n  reverse_proxy unix//run/{service_id}-{slot}.sock\n}\n",
 		ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"},
 	}
 	service := model.Service{
@@ -181,24 +185,24 @@ func TestDeployDomainsUpdatesSuspendedRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	content, _ := os.ReadFile(adapter.Path(service.ID))
-	if updated.MainDomain != "new.example.com" || !strings.Contains(string(content), "new.example.com, new.staging.test") || strings.Contains(string(content), "reverse_proxy") {
+	if updated.MainDomain != "new.example.com" || !strings.Contains(string(content), "new.example.com, www.new.example.com, new.staging.test") || strings.Contains(string(content), "www.new.staging.test") || strings.Contains(string(content), "reverse_proxy") {
 		t.Fatalf("suspended hostname was not reconciled: service=%#v caddy=%q", updated, content)
 	}
 }
 
 func TestRoutingDomainsUsesPendingHostname(t *testing.T) {
 	service := model.Service{MainDomain: "old.example.com", StagingDomain: "old.staging.test", TargetMainDomain: "new.example.com", TargetStagingDomain: "new.staging.test"}
-	if got := routingDomains(service, "upgrade"); got[0] != service.TargetMainDomain || got[1] != service.TargetStagingDomain {
+	if got := routingDomains(service, "upgrade"); !reflect.DeepEqual(got, []string{service.TargetMainDomain, "www." + service.TargetMainDomain, service.TargetStagingDomain}) {
 		t.Fatalf("routingDomains() = %#v", got)
 	}
-	if got := routingDomains(service, "resume"); got[0] != service.MainDomain || got[1] != service.StagingDomain {
+	if got := routingDomains(service, "resume"); !reflect.DeepEqual(got, []string{service.MainDomain, "www." + service.MainDomain, service.StagingDomain}) {
 		t.Fatalf("resume used pending hostname: %#v", got)
 	}
 	service.StagingDomain, service.TargetStagingDomain = "", ""
-	if got := routingDomains(service, "resume"); len(got) != 1 || got[0] != service.MainDomain {
+	if got := routingDomains(service, "resume"); !reflect.DeepEqual(got, []string{service.MainDomain, "www." + service.MainDomain}) {
 		t.Fatalf("resume routed empty staging hostname: %#v", got)
 	}
-	if got := routingDomains(service, "upgrade"); len(got) != 1 || got[0] != service.TargetMainDomain {
+	if got := routingDomains(service, "upgrade"); !reflect.DeepEqual(got, []string{service.TargetMainDomain, "www." + service.TargetMainDomain}) {
 		t.Fatalf("upgrade routed empty staging hostname: %#v", got)
 	}
 }
@@ -1001,7 +1005,7 @@ func TestInitialRoutingRecordsAsynchronousDNSResult(t *testing.T) {
 	}
 	manager := Manager{
 		Context: t.Context(), Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, dnsBackoffs: []time.Duration{0},
-		Caddy:  caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+		Caddy:  caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{hostnames} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
 		Config: testDNSConfig(), DNSKey: "secret",
 		healthAttempts: map[string]uint64{service.ID: 1},
 		dnsHTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -1049,7 +1053,7 @@ func TestResumeHealthSwitchesToOppositeSlot(t *testing.T) {
 	}
 	manager := Manager{
 		Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, healthAttempts: map[string]uint64{service.ID: 1},
-		Caddy: caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{domain} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+		Caddy: caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{hostnames} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
 	}
 	manager.finishHealth(service, "resume", "request-1", 1)
 	if _, ok := manager.healthAttempts[service.ID]; ok {

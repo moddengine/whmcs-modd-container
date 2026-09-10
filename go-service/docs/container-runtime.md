@@ -191,12 +191,13 @@ import /etc/caddy/services/*.caddy
 Caddy must see the service directory, Unix socket tree, and suspension root at
 the same paths referenced by the controller configuration.
 
-For active routing, `caddy.active_template` is expanded for the main domain
-and, when configured, the staging domain. The standard template proxies to the
-selected slot:
+For active routing, `caddy.active_template` is expanded once with the main
+domain, its `www` alias, and, when configured, the staging domain. The staging
+domain does not receive a `www` alias. The standard template proxies all
+hostnames to the selected slot:
 
 ```caddyfile
-example.com {
+example.com, www.example.com, example-com.staging.com {
   reverse_proxy unix//run/whmcs/whmcs-123-blue/http.sock
 }
 ```
