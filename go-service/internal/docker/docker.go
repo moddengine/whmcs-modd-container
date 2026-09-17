@@ -111,6 +111,7 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 	socketPath, _ := SocketLayout(service.Version)
 	replacer := strings.NewReplacer(
 		"{mountpoint}", service.Dataset.Mountpoint,
+		"{scratch_mountpoint}", cfg.ScratchMountpoint,
 		"{slot}", slot,
 		"{service_id}", service.ID,
 		"{socket_path}", socketPath,

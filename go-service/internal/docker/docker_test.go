@@ -211,9 +211,10 @@ func TestContainerSpec(t *testing.T) {
 	}
 	cfg := config.Docker{
 		Network: "udo-net", ImageRepository: "whmcs-runtime",
-		Binds:                []string{"{mountpoint}/{slot}/cache:/cache", "/modd/host/caddy/http/{service_id}-{slot}:{socket_path}"},
+		Binds:                []string{"{scratch_mountpoint}/{service_id}/{slot}/cache:/cache", "/modd/host/caddy/http/{service_id}-{slot}:{socket_path}"},
 		Environment:          []string{"SERVICE={service_id}", "DATA={mountpoint}", "DEPLOY={slot}"},
 		CertificateMountPath: "/srv/modd/secrets",
+		ScratchMountpoint:    "/modd/scratch",
 	}
 	spec, host, networking, err := ContainerSpec(cfg, service, "blue")
 	if err != nil {
@@ -242,7 +243,7 @@ func TestContainerSpec(t *testing.T) {
 		t.Fatalf("package environment is not deterministic: %#v", spec.Env)
 	}
 	if !slices.Equal(host.Binds, []string{
-		"/modd/sites/whmcs-123/blue/cache:/cache",
+		"/modd/scratch/whmcs-123/blue/cache:/cache",
 		"/modd/host/caddy/http/whmcs-123-blue:/run/moddengine",
 		"/modd/sites/whmcs-123/secrets:/srv/modd/secrets:ro",
 		"/run/whmcs/whmcs-123-blue:/run/whmcs/whmcs-123-blue",

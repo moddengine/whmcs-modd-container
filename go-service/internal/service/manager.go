@@ -296,6 +296,9 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	if err := m.createSkeleton(service); err != nil {
 		return fail(err)
 	}
+	if err := m.prepareSlot(service, "blue"); err != nil {
+		return fail(err)
+	}
 	if err := m.issueIdentity(service, true); err != nil {
 		return fail(err)
 	}
@@ -523,6 +526,10 @@ func (m *Manager) Resume(ctx context.Context, id string, req model.ResumeRequest
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("resume_failed", err)
 	}
+	if err := m.prepareSlot(service, target); err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("cache_prepare_failed", err)
+	}
 	if err := os.Remove(updated.Deploy[target].Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("stale_socket_remove_failed", err)
@@ -593,6 +600,12 @@ func (m *Manager) changeState(ctx context.Context, id, requestID, target string)
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable(target+"_failed", err)
 	}
+	if target == model.Terminated {
+		if err := m.removeDeployDirs(service); err != nil {
+			m.failSync(service, requestID, err)
+			return nil, false, unprocessable("cache_cleanup_failed", err)
+		}
+	}
 	service.State, service.Phase, service.LastError, service.UpdatedAt = target, "routing", "", time.Now().UTC()
 	m.mu.Lock()
 	err = m.Repo.Put(service)
@@ -653,6 +666,10 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) (*model.Tomb
 	if err := m.Docker.RemoveAll(ctx, id); err != nil {
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("delete_failed", err)
+	}
+	if err := m.removeDeployDirs(service); err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("cache_cleanup_failed", err)
 	}
 	if err := m.Caddy.Remove(ctx, id); err != nil {
 		m.failSync(service, requestID, err)
@@ -1089,6 +1106,10 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("upgrade_failed", err)
 	}
+	if err := m.prepareSlot(service, target); err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("cache_prepare_failed", err)
+	}
 	if err := os.Remove(updated.Deploy[target].Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("stale_socket_remove_failed", err)
@@ -1206,8 +1227,12 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 		return
 	}
 	if operation == "resume" && m.Docker != nil {
-		if err := m.Docker.RemoveSlot(ctx, service.ID, service.LiveDeploy); err != nil && m.Logger != nil {
-			m.Logger.Warn("remove previous resume slot", "service_id", service.ID, "slot", service.LiveDeploy, "error", err)
+		if err := m.Docker.RemoveSlot(ctx, service.ID, service.LiveDeploy); err != nil {
+			if m.Logger != nil {
+				m.Logger.Warn("remove previous resume slot", "service_id", service.ID, "slot", service.LiveDeploy, "error", err)
+			}
+		} else if err := m.removeSlotDirs(service, service.LiveDeploy); err != nil && m.Logger != nil {
+			m.Logger.Warn("remove previous resume cache", "service_id", service.ID, "slot", service.LiveDeploy, "error", err)
 		}
 	}
 	if operation == "upgrade" {
@@ -1224,7 +1249,10 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 		}
 		cleanupCtx, cleanupCancel := m.operationContext(m.Config.Deployment.TrafficDrain + m.Config.Server.RequestTimeout)
 		err := cleanupOldDeploy(cleanupCtx, m.Config.Deployment.TrafficDrain, func(ctx context.Context) error {
-			return m.Docker.RemoveSlot(ctx, service.ID, service.LiveDeploy)
+			if err := m.Docker.RemoveSlot(ctx, service.ID, service.LiveDeploy); err != nil {
+				return err
+			}
+			return m.removeSlotDirs(service, service.LiveDeploy)
 		})
 		cleanupCancel()
 		if err != nil {
@@ -2025,7 +2053,6 @@ func (m *Manager) liveService(id string) (model.Service, error) {
 func (m *Manager) createSkeleton(service model.Service) error {
 	dirs := []string{
 		"site/data", "backup", "secrets",
-		"blue/cache", "blue/run", "blue/debug", "green/cache", "green/run", "green/debug",
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(filepath.Join(service.Dataset.Mountpoint, dir), 0750); err != nil {
@@ -2038,6 +2065,59 @@ func (m *Manager) createSkeleton(service model.Service) error {
 		}
 	}
 	return nil
+}
+
+func (m *Manager) prepareSlot(service model.Service, slot string) error {
+	if err := m.removeSlotDirs(service, slot); err != nil {
+		return err
+	}
+	scratchRoot, err := m.scratchPath(service.ID)
+	if err != nil {
+		return err
+	}
+	root := filepath.Join(scratchRoot, slot)
+	for _, dir := range []string{"cache", "run", "debug"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0750); err != nil {
+			return err
+		}
+	}
+	identity, err := isolation.ForService(service.ID)
+	if err != nil {
+		return err
+	}
+	return isolation.ChownTree(scratchRoot, identity)
+}
+
+func (m *Manager) removeSlotDirs(service model.Service, slot string) error {
+	scratchRoot, err := m.scratchPath(service.ID)
+	if err != nil {
+		return err
+	}
+	return errors.Join(
+		os.RemoveAll(filepath.Join(service.Dataset.Mountpoint, slot)),
+		os.RemoveAll(filepath.Join(scratchRoot, slot)),
+	)
+}
+
+func (m *Manager) removeDeployDirs(service model.Service) error {
+	scratchRoot, err := m.scratchPath(service.ID)
+	if err != nil {
+		return err
+	}
+	return errors.Join(
+		os.RemoveAll(filepath.Join(service.Dataset.Mountpoint, "blue")),
+		os.RemoveAll(filepath.Join(service.Dataset.Mountpoint, "green")),
+		os.RemoveAll(scratchRoot),
+	)
+}
+
+func (m *Manager) scratchPath(id string) (string, error) {
+	root := filepath.Clean(m.ZFS.ScratchMountpoint)
+	path := m.ZFS.ScratchPath(id)
+	if !filepath.IsAbs(root) || root == string(filepath.Separator) || filepath.Dir(path) != root {
+		return "", errors.New("invalid scratch mountpoint")
+	}
+	return path, nil
 }
 
 func (m *Manager) issueIdentity(service model.Service, newKey bool) error {
@@ -2109,6 +2189,16 @@ func (m *Manager) ensureIsolation(ctx context.Context, service model.Service) er
 		return err
 	}
 	if err := isolation.ChownTree(service.Dataset.Mountpoint, identity); err != nil {
+		return err
+	}
+	scratchRoot, err := m.scratchPath(service.ID)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(scratchRoot, 0750); err != nil {
+		return err
+	}
+	if err := isolation.ChownTree(scratchRoot, identity); err != nil {
 		return err
 	}
 	for _, slot := range []string{"blue", "green"} {

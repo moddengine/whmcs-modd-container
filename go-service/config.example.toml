@@ -9,6 +9,8 @@ bearer_token_file = "/etc/modd-hosting/api-token"
 [zfs]
 dataset_prefix = "tank/modd/sites"
 mount_prefix = "/modd/sites"
+scratch_dataset = "tank/modd/scratch"
+scratch_mountpoint = "/modd/scratch"
 
 [state]
 services_dir = "/var/lib/modd-hosting/services"
@@ -32,7 +34,7 @@ pull_timeout = "30m"
 binds = [
   "{mountpoint}/site:/srv/modd/site",
   "{mountpoint}/backup:/srv/modd/backup",
-  "{mountpoint}/{slot}/cache:/srv/modd/cache",
+  "{scratch_mountpoint}/{service_id}/{slot}/cache:/srv/modd/cache",
   "/modd/host/caddy/http/{service_id}-{slot}:{socket_path}",
 ]
 environment = []

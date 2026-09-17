@@ -141,11 +141,23 @@ password.
 | --- | --- |
 | `zfs.dataset_prefix` | Parent dataset; a service becomes `<prefix>/whmcs-123`. |
 | `zfs.mount_prefix` | Absolute mount root; a service becomes `<root>/whmcs-123`. |
+| `zfs.scratch_dataset` | Shared dataset for disposable deployment caches. |
+| `zfs.scratch_mountpoint` | Mountpoint of the shared scratch dataset. |
 | `state.services_dir` | Live per-service TOML records. |
 | `state.tombstones_dir` | Records retained after permanent deletion. |
 
 Back up the services and tombstones directories; site content follows the ZFS
-pool's snapshot and replication policy.
+pool's snapshot and replication policy. Exclude the scratch dataset from
+snapshots and replication.
+
+Create the shared dataset before starting the controller:
+
+```sh
+zfs create -o mountpoint=/modd/scratch tank/modd/scratch
+```
+
+Startup fails if the configured scratch dataset is absent, unmounted, or
+mounted somewhere else.
 
 ### Caddy
 

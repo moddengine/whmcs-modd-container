@@ -38,8 +38,10 @@ type Auth struct {
 	BearerTokenFile string `toml:"bearer_token_file"`
 }
 type ZFS struct {
-	DatasetPrefix string `toml:"dataset_prefix"`
-	MountPrefix   string `toml:"mount_prefix"`
+	DatasetPrefix     string `toml:"dataset_prefix"`
+	MountPrefix       string `toml:"mount_prefix"`
+	ScratchDataset    string `toml:"scratch_dataset"`
+	ScratchMountpoint string `toml:"scratch_mountpoint"`
 }
 type State struct {
 	ServicesDir   string `toml:"services_dir"`
@@ -60,6 +62,7 @@ type Docker struct {
 	PullTimeout          time.Duration `toml:"-"`
 	PullTimeoutRaw       string        `toml:"pull_timeout"`
 	CertificateMountPath string        `toml:"-"`
+	ScratchMountpoint    string        `toml:"-"`
 }
 type Certificates struct {
 	RootCertificate         string `toml:"root_certificate"`
@@ -99,6 +102,7 @@ func Load(path string) (Config, error) {
 		return c, fmt.Errorf("parse config: %w", err)
 	}
 	c.Docker.CertificateMountPath = c.Certificates.MountPath
+	c.Docker.ScratchMountpoint = c.ZFS.ScratchMountpoint
 	if c.Docker.PullTimeoutRaw == "" {
 		c.Docker.PullTimeout = 30 * time.Minute
 	}
@@ -136,8 +140,17 @@ func (c Config) Validate() error {
 	if c.ZFS.DatasetPrefix == "" || strings.HasPrefix(c.ZFS.DatasetPrefix, "/") || strings.Contains(c.ZFS.DatasetPrefix, "..") {
 		return errors.New("zfs.dataset_prefix must be a safe dataset name")
 	}
+	if c.ZFS.ScratchDataset == "" || strings.HasPrefix(c.ZFS.ScratchDataset, "/") || strings.Contains(c.ZFS.ScratchDataset, "..") {
+		return errors.New("zfs.scratch_dataset must be a safe dataset name")
+	}
+	if c.ZFS.ScratchDataset == c.ZFS.DatasetPrefix {
+		return errors.New("zfs.scratch_dataset must differ from zfs.dataset_prefix")
+	}
+	if c.ZFS.ScratchMountpoint == c.ZFS.MountPrefix {
+		return errors.New("zfs.scratch_mountpoint must differ from zfs.mount_prefix")
+	}
 	for name, path := range map[string]string{
-		"zfs.mount_prefix": c.ZFS.MountPrefix, "state.services_dir": c.State.ServicesDir,
+		"zfs.mount_prefix": c.ZFS.MountPrefix, "zfs.scratch_mountpoint": c.ZFS.ScratchMountpoint, "state.services_dir": c.State.ServicesDir,
 		"state.tombstones_dir": c.State.TombstonesDir, "caddy.service_config_dir": c.Caddy.ServiceConfigDir,
 		"deployment.socket":                     c.Deployment.Socket,
 		"certificates.root_certificate":         c.Certificates.RootCertificate,

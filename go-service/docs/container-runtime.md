@@ -15,8 +15,9 @@ Each service has these durable and observed resources:
 | Resource | Purpose |
 | --- | --- |
 | `<state.services_dir>/<id>.toml` | Desired lifecycle state, current/target deployment, paths, and the last error. Writes are atomic and retain a `.bak` of the previous live record. |
-| `<zfs.dataset_prefix>/<id>` | Persistent site data, backups, secrets, and slot-local data. |
+| `<zfs.dataset_prefix>/<id>` | Persistent site data, backups, and secrets. |
 | `<zfs.mount_prefix>/<id>` | Dataset mountpoint and Docker bind source. |
+| `<zfs.scratch_mountpoint>/<id>/<slot>` | Disposable slot-local cache, run, and debug data. |
 | `<zfs.mount_prefix>/<id>/secrets` | Atomic 32-hour identity certificate, private key, and configured root certificate; mounted read-only at `<certificates.mount_path>`. |
 | Host user/group `<id>` | Owns writable storage and socket directories. |
 | `WHMCS-<id>-blue` / `-green` | Alternating Docker deployment slots. |
@@ -63,8 +64,8 @@ Every container has:
   `au.modd.app`, and `au.modd.deploy`;
 - `ME_SITE=<service-id>`, `ME_INSTANCE=<service-id>-<slot>`, configured
   environment entries, and the service's sorted `ME_PACKAGE_*` entries;
-- configured bind mounts with `{mountpoint}`, `{service_id}`, `{slot}`, and
-  `{socket_path}` expanded; and
+- configured bind mounts with `{mountpoint}`, `{scratch_mountpoint}`,
+  `{service_id}`, `{slot}`, and `{socket_path}` expanded; and
 - the slot socket directory mounted at the identical host/container path.
 
 The image must support an arbitrary non-root UID/GID, write only to writable
@@ -97,19 +98,20 @@ group values as `<slug>|<display name>`.
    and phase `provisioning`. Persisting intent before host changes makes a
    partial operation visible and retryable.
 4. It creates the ZFS dataset if absent, using the configured mountpoint.
-5. It creates the storage skeleton:
+5. It creates the persistent storage skeleton and the blue slot's disposable
+   scratch directories:
 
    ```text
    site/data
    backup
    secrets/{ident.crt,ident.key,root.crt}
+   # Under <zfs.scratch_mountpoint>/<id>:
    blue/{cache,run,debug}
-   green/{cache,run,debug}
    ```
 
-6. It creates or verifies the host user/group, recursively assigns the dataset
-   and socket directories to that identity, and refuses conflicting UID/GID
-   assignments.
+6. It creates or verifies the host user/group, recursively assigns the site,
+   scratch, and socket directories to that identity, and refuses conflicting
+   UID/GID assignments.
    The controller issues a new identity key and 32-hour certificate, bundles
    the leaf and intermediate certificates in `ident.crt`, then
    re-signs active identities with the same key every eight hours. Resume
@@ -231,15 +233,17 @@ For an upgrade from blue to green:
 2. Re-verify the service identity and ownership.
 3. Inspect Caddy. If it is missing or does not proxy to blue, restore routing
    to blue before touching green.
-4. Remove any old green container and stale green socket. Container removal
-   verifies the managed and service-ID labels before proceeding.
+4. Remove any old green container, both legacy and scratch green directories,
+   and the stale green socket. Container removal verifies the managed and
+   service-ID labels before proceeding.
 5. Create and start green with the target image.
 6. Persist `waiting_for_health` with green health `checking`, start deferred
    work, and return `202`. Blue continues serving traffic.
 7. When green is healthy, verify or repair DNS and wait five seconds after a
    change or transient failure, then atomically change the Caddyfile to green
    and persist phase `draining`.
-8. Wait `deployment.traffic_drain`, then remove the old blue container.
+8. Wait `deployment.traffic_drain`, then remove the old blue container and its
+   directories from both the persistent and scratch datasets.
 9. Commit `live_deploy=green`, the new service version, phase `running`, and
    clear the operation/target fields.
 
@@ -295,16 +299,19 @@ resources:
 1. Persist phase `stopping` and operation `terminated`.
 2. Force-remove every managed service container after verifying its management
    and service-ID labels.
-3. Persist state `terminated` and phase `routing`.
-4. Remove the service Caddyfile, validate Caddy, and reload it.
-5. Persist phase `stopped`, clear the operation, and reset deployment health to
+3. Remove both blue/green directories from the persistent dataset and the
+   service subtree from the shared scratch dataset.
+4. Persist state `terminated` and phase `routing`.
+5. Remove the service Caddyfile, validate Caddy, and reload it.
+6. Persist phase `stopped`, clear the operation, and reset deployment health to
    `unknown`.
 
-The ZFS dataset, mountpoint contents, host identity, socket directories, live
-slot selection, and version remain so the service can be resumed. Termination
-is therefore reversible; deletion is not. A new provisioning request updates
-the retained hostname, IP, version, and display name, then redeploys the
-terminated service with its existing data.
+The persistent ZFS dataset, customer data, host identity, socket directories,
+live slot selection, and version remain so the service can be resumed. Slot
+caches are disposable and do not remain. Termination is therefore reversible;
+deletion is not. A new provisioning request updates the retained hostname, IP,
+version, and display name, then redeploys the terminated service with its
+existing data.
 
 ## Permanent deletion
 

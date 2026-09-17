@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +25,7 @@ import (
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 	"github.com/moddengine/whmcs-container-controller/internal/notify"
 	"github.com/moddengine/whmcs-container-controller/internal/state"
+	"github.com/moddengine/whmcs-container-controller/internal/zfs"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -219,6 +221,41 @@ func TestCleanupOldDeployHonorsCancellation(t *testing.T) {
 	}
 	if removed {
 		t.Fatal("old deployment ran after cancellation")
+	}
+}
+
+func TestRemoveDeployDirsCleansPersistentAndScratchSlots(t *testing.T) {
+	root := t.TempDir()
+	service := model.Service{
+		ID:      "whmcs-123",
+		Dataset: model.DatasetRecord{Mountpoint: filepath.Join(root, "sites", "whmcs-123")},
+	}
+	manager := Manager{ZFS: zfs.Adapter{ScratchMountpoint: filepath.Join(root, "scratch")}}
+	for _, path := range []string{
+		filepath.Join(service.Dataset.Mountpoint, "site", "data"),
+		filepath.Join(service.Dataset.Mountpoint, "blue", "cache"),
+		filepath.Join(service.Dataset.Mountpoint, "green", "cache"),
+		filepath.Join(manager.ZFS.ScratchPath(service.ID), "blue", "cache"),
+		filepath.Join(manager.ZFS.ScratchPath(service.ID), "green", "cache"),
+	} {
+		if err := os.MkdirAll(path, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := manager.removeDeployDirs(service); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(service.Dataset.Mountpoint, "site", "data")); err != nil {
+		t.Fatalf("persistent site data was removed: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(service.Dataset.Mountpoint, "blue"),
+		filepath.Join(service.Dataset.Mountpoint, "green"),
+		manager.ZFS.ScratchPath(service.ID),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("deployment directory %q still exists: %v", path, err)
+		}
 	}
 }
 
@@ -1062,6 +1099,91 @@ func TestResumeHealthSwitchesToOppositeSlot(t *testing.T) {
 	got, err := repo.Get(service.ID)
 	if err != nil || got.State != model.Active || got.Phase != "running" || got.LiveDeploy != "green" || got.Package["plan"] != "new" || got.TargetPackage != nil {
 		t.Fatalf("resumed service = %#v, %v", got, err)
+	}
+}
+
+func TestHealthyUpgradeRemovesOldSlotFromPersistentAndScratchStorage(t *testing.T) {
+	for _, slots := range [][2]string{{"blue", "green"}, {"green", "blue"}} {
+		live, target := slots[0], slots[1]
+		t.Run(live+" to "+target, func(t *testing.T) {
+			root := t.TempDir()
+			socket := filepath.Join(root, target+".sock")
+			listener, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })}
+			go server.Serve(listener)
+			t.Cleanup(func() { _ = server.Close() })
+
+			removed := false
+			dockerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/json"):
+					_, _ = io.WriteString(w, `[{"Id":"old","Labels":{"au.modd.managed":"true","au.modd.service-id":"whmcs-123","au.modd.deploy":"`+live+`","au.modd.version":"v1"},"State":"running"}]`)
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/old/json"):
+					_, _ = io.WriteString(w, `{"Id":"old","Config":{"Labels":{"au.modd.managed":"true","au.modd.service-id":"whmcs-123"}}}`)
+				case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/containers/old"):
+					removed = true
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer dockerAPI.Close()
+			t.Setenv("DOCKER_HOST", dockerAPI.URL)
+			t.Setenv("DOCKER_API_VERSION", "1.52")
+			docker, err := dockeradapter.New(config.Docker{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer docker.Close()
+
+			repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+			if err := repo.Init(); err != nil {
+				t.Fatal(err)
+			}
+			service := model.Service{
+				ID: "whmcs-123", State: model.Active, Phase: "waiting_for_health", Operation: "upgrade",
+				LiveDeploy: live, TargetDeploy: target, Version: "v1", TargetVersion: "v2", MainDomain: "example.com",
+				Dataset: model.DatasetRecord{Mountpoint: filepath.Join(root, "sites", "whmcs-123")},
+				Deploy:  map[string]model.Deploy{live: {Version: "v1"}, target: {Socket: socket, Version: "v2", Health: "checking"}},
+			}
+			if err := repo.Put(service); err != nil {
+				t.Fatal(err)
+			}
+			scratchRoot := filepath.Join(root, "scratch")
+			oldDirs := []string{
+				filepath.Join(service.Dataset.Mountpoint, live, "cache"),
+				filepath.Join(scratchRoot, service.ID, live, "cache"),
+			}
+			for _, path := range append(oldDirs, filepath.Join(scratchRoot, service.ID, target, "cache")) {
+				if err := os.MkdirAll(path, 0750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manager := Manager{
+				Repo: repo, Docker: docker, ZFS: zfs.Adapter{ScratchMountpoint: scratchRoot}, Notify: notify.Disabled{},
+				Health: healthcheck.Checker{Path: "/health", Attempts: 1}, healthAttempts: map[string]uint64{service.ID: 1},
+				Caddy: caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{hostnames} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+			}
+			manager.finishHealth(service, "upgrade", "request-1", 1)
+			if !removed {
+				t.Fatal("old container was not removed")
+			}
+			for _, path := range oldDirs {
+				if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("old deployment directory %q still exists: %v", filepath.Dir(path), err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(scratchRoot, service.ID, target, "cache")); err != nil {
+				t.Fatalf("healthy target cache was removed: %v", err)
+			}
+			got, err := repo.Get(service.ID)
+			if err != nil || got.Phase != "running" || got.LiveDeploy != target {
+				t.Fatalf("completed upgrade = %#v, %v", got, err)
+			}
+		})
 	}
 }
 

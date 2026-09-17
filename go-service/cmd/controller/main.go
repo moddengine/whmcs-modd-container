@@ -72,6 +72,14 @@ func main() {
 	}
 	defer docker.Close()
 	startupContext, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
+	zfsAdapter := zfs.Adapter{
+		Prefix: cfg.ZFS.DatasetPrefix, MountPrefix: cfg.ZFS.MountPrefix,
+		ScratchDataset: cfg.ZFS.ScratchDataset, ScratchMountpoint: cfg.ZFS.ScratchMountpoint,
+	}
+	if err := zfsAdapter.ValidateScratch(startupContext); err != nil {
+		cancelStartup()
+		fatal(fmt.Errorf("scratch dataset unavailable: %w", err))
+	}
 	dockerAPI, err := docker.Ping(startupContext)
 	if err != nil {
 		cancelStartup()
@@ -94,7 +102,7 @@ func main() {
 	}
 	manager := &service.Manager{
 		Config: cfg, Repo: repo, Docker: docker,
-		ZFS: zfs.Adapter{Prefix: cfg.ZFS.DatasetPrefix, MountPrefix: cfg.ZFS.MountPrefix},
+		ZFS: zfsAdapter,
 		Caddy: caddy.Adapter{
 			Dir: cfg.Caddy.ServiceConfigDir, SuspensionRoot: cfg.Caddy.SuspensionRoot, ActiveTemplate: cfg.Caddy.ActiveTemplate,
 			ValidateCommand: cfg.Caddy.ValidateCommand, ReloadCommand: cfg.Caddy.ReloadCommand,

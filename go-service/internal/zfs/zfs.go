@@ -9,12 +9,27 @@ import (
 )
 
 type Adapter struct {
-	Prefix      string
-	MountPrefix string
+	Prefix            string
+	MountPrefix       string
+	ScratchDataset    string
+	ScratchMountpoint string
 }
 
-func (a Adapter) Dataset(id string) string    { return a.Prefix + "/" + id }
-func (a Adapter) Mountpoint(id string) string { return a.MountPrefix + "/" + id }
+func (a Adapter) Dataset(id string) string     { return a.Prefix + "/" + id }
+func (a Adapter) Mountpoint(id string) string  { return a.MountPrefix + "/" + id }
+func (a Adapter) ScratchPath(id string) string { return a.ScratchMountpoint + "/" + id }
+
+func (a Adapter) ValidateScratch(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "zfs", "list", "-H", "-o", "mountpoint,mounted", a.ScratchDataset).Output()
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 || fields[0] != a.ScratchMountpoint || fields[1] != "yes" {
+		return fmt.Errorf("scratch dataset %q must be mounted at %q", a.ScratchDataset, a.ScratchMountpoint)
+	}
+	return nil
+}
 
 func (a Adapter) Exists(ctx context.Context, id string) (bool, error) {
 	err := exec.CommandContext(ctx, "zfs", "list", "-H", "-o", "name", a.Dataset(id)).Run()
