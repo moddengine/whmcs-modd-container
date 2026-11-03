@@ -57,6 +57,13 @@ Deletion is only allowed after termination. WHMCS termination removes runtime
 resources while retaining customer data; permanent purging remains an
 administrator action in **Addons > Modd Hosting**.
 
+While provisioning, resume, or an upgrade is waiting for health checks, select
+a fixed image version and click **Deploy** to replace the pending container.
+The replacement must pass its own health check before it receives traffic;
+an active service keeps its current live deployment during an upgrade.
+**Suspend** and **Terminate** also abandon a deployment waiting for health.
+Starting, routing, and draining remain protected from concurrent changes.
+
 ## Requirements
 
 - Linux with Docker Engine and ZFS;

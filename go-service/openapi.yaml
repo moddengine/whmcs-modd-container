@@ -160,7 +160,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     put:
       summary: Provision or reconcile a service
-      description: Existing active services reconcile domains and image version; force_redeploy recreates the selected version through blue-green deployment. Suspended services reconcile domains only.
+      description: Existing active services reconcile domains and image version; force_redeploy recreates the selected version through blue-green deployment. A deployment waiting for health may be replaced, including initial provisioning or resume; the replacement must pass its own checks. Suspended services without a pending activation reconcile domains only. Starting, routing, and draining remain protected.
       operationId: provisionService
       requestBody:
         required: true
@@ -187,6 +187,7 @@ paths:
   /v1/services/{id}/suspend:
     post:
       summary: Suspend an active service
+      description: Also abandons provisioning, resume, or upgrade while waiting for health checks, stopping all containers and preserving data. Starting, routing, and draining remain protected.
       operationId: suspendService
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]
       responses:
@@ -211,6 +212,7 @@ paths:
   /v1/services/{id}/terminate:
     post:
       summary: Terminate a service while preserving data
+      description: Also abandons provisioning, resume, or upgrade while waiting for health checks. Starting, routing, and draining remain protected.
       operationId: terminateService
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]
       responses:
@@ -237,7 +239,7 @@ paths:
   /v1/services/{id}/upgrade:
     post:
       summary: Deploy an image version using blue-green switching
-      description: A new request may replace an upgrade that is still waiting for health checks; later phases remain protected from concurrent lifecycle changes.
+      description: A new request may replace provisioning, resume, or upgrade while waiting for health checks or retry a failed activation. An active upgrade retains the live deployment; provisioning and resume remain unrouted until the replacement passes its own health checks. Starting, routing, and draining remain protected. Downgrades or unordered version tags still require confirm_downgrade.
       operationId: upgradeService
       parameters: [{ $ref: "#/components/parameters/ServiceID" }]
       requestBody:

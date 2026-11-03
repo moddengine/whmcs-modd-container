@@ -69,6 +69,7 @@ type Manager struct {
 	DNSKey       string
 	// ponytail: serialize lifecycle writes; switch to per-service locks only if parallel upgrades are needed.
 	mu                       sync.Mutex
+	healthSequence           uint64
 	healthAttempts           map[string]uint64
 	dnsBackoffs              []time.Duration
 	dnsTimeout               time.Duration
@@ -205,7 +206,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 		derive(&existing)
 	}
 	m.mu.Unlock()
-	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.PublicIPv4 == publicIPv4 && existing.Version == req.Version) {
+	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.PublicIPv4 == publicIPv4 && existing.Version == req.Version && existing.TargetVersion == req.Version && !req.ForceRedeploy) {
 		return m.reconcile(ctx, id, mainDomain, stagingDomain, publicIPv4, req.Version, req.DisplayName, packageValues, requestID, req.ForceRedeploy)
 	}
 	if existingErr != nil && !errors.Is(existingErr, state.ErrNotFound) {
@@ -334,6 +335,9 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 	sameVersion := service.Version == version
 	m.mu.Unlock()
 
+	if replaceableActivation(service) {
+		return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4, packageValues, forceRedeploy)
+	}
 	if state == model.Active {
 		if !sameVersion || forceRedeploy {
 			return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4, packageValues, forceRedeploy)
@@ -569,13 +573,13 @@ func (m *Manager) changeState(ctx context.Context, id, requestID, target string)
 		status, err := m.status(ctx, service)
 		return status, false, err
 	}
-	if busy(service.Phase) {
+	if busy(service.Phase) && service.Phase != "waiting_for_health" {
 		m.mu.Unlock()
 		return nil, false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
 	}
 	switch target {
 	case model.Suspended:
-		if service.State != model.Active && service.State != model.Suspended {
+		if service.State != model.Active && service.State != model.Suspended && !(service.Operation == "resume" && service.Phase == "waiting_for_health") {
 			m.mu.Unlock()
 			return nil, false, conflict(fmt.Errorf("cannot suspend service from %s", service.State))
 		}
@@ -590,6 +594,7 @@ func (m *Manager) changeState(ctx context.Context, id, requestID, target string)
 		m.mu.Unlock()
 		return nil, false, internal(err)
 	}
+	delete(m.healthAttempts, id)
 	m.mu.Unlock()
 	if target == model.Suspended {
 		err = m.Docker.StopAll(ctx, id)
@@ -1020,9 +1025,6 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		return nil, false, err
 	}
 	derive(&service)
-	if targetPackage == nil {
-		targetPackage = service.Package
-	}
 	done, validationErr := validateUpgrade(service, req, forceRedeploy)
 	m.mu.Unlock()
 	if validationErr != nil {
@@ -1064,7 +1066,13 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		status, err := m.status(ctx, service)
 		return status, false, err
 	}
-	if service.Phase == "waiting_for_health" && service.Operation == "upgrade" {
+	if targetPackage == nil {
+		targetPackage = service.Package
+		if service.TargetPackage != nil && (service.Phase == "waiting_for_health" || replaceableActivation(service)) {
+			targetPackage = service.TargetPackage
+		}
+	}
+	if service.Phase == "waiting_for_health" || replaceableActivation(service) {
 		if targetMainDomain == "" {
 			targetMainDomain, targetStagingDomain = service.TargetMainDomain, service.TargetStagingDomain
 		}
@@ -1072,8 +1080,15 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 			targetPublicIPv4 = service.TargetPublicIPv4
 		}
 	}
+	operation := "upgrade"
 	target := opposite(service.LiveDeploy)
-	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.UpdatedAt = "starting", "upgrade", target, req.Version, time.Now().UTC()
+	if replaceableActivation(service) {
+		operation = service.Operation
+		if operation == "provision" {
+			target = service.LiveDeploy
+		}
+	}
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.UpdatedAt = "starting", operation, target, req.Version, time.Now().UTC()
 	service.TargetMainDomain, service.TargetStagingDomain = targetMainDomain, targetStagingDomain
 	service.TargetPublicIPv4 = targetPublicIPv4
 	service.TargetPackage = targetPackage
@@ -1088,23 +1103,28 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		m.failSync(service, requestID, err)
 		return nil, false, unprocessable("isolation_failed", err)
 	}
-	configured, mode, socket, err := m.Caddy.Status(id)
-	if err != nil {
-		m.failSync(service, requestID, err)
-		return nil, false, internal(err)
-	}
-	if !configured || mode != "proxy" || socket != m.Caddy.Socket(id, service.LiveDeploy, deploymentSocketName(service, service.LiveDeploy)) {
-		if err := m.Caddy.Active(ctx, id, domains(service), service.LiveDeploy, deploymentSocketName(service, service.LiveDeploy)); err != nil {
+	if operation == "upgrade" {
+		configured, mode, socket, err := m.Caddy.Status(id)
+		if err != nil {
 			m.failSync(service, requestID, err)
-			return nil, false, internal(fmt.Errorf("restore Caddy live deployment: %w", err))
+			return nil, false, internal(err)
 		}
+		if !configured || mode != "proxy" || socket != m.Caddy.Socket(id, service.LiveDeploy, deploymentSocketName(service, service.LiveDeploy)) {
+			if err := m.Caddy.Active(ctx, id, domains(service), service.LiveDeploy, deploymentSocketName(service, service.LiveDeploy)); err != nil {
+				m.failSync(service, requestID, err)
+				return nil, false, internal(fmt.Errorf("restore Caddy live deployment: %w", err))
+			}
+		}
+	} else if err := m.issueIdentity(service, true); err != nil {
+		m.failSync(service, requestID, err)
+		return nil, false, unprocessable("certificate_issue_failed", err)
 	}
 	updated := service
 	updated.Version = req.Version
 	updated.Package = targetPackage
 	if err := m.Docker.RemoveSlot(ctx, id, target); err != nil {
 		m.failSync(service, requestID, err)
-		return nil, false, unprocessable("upgrade_failed", err)
+		return nil, false, unprocessable(operation+"_failed", err)
 	}
 	if err := m.prepareSlot(service, target); err != nil {
 		m.failSync(service, requestID, err)
@@ -1116,7 +1136,7 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 	}
 	if err := m.Docker.StartSlot(ctx, updated, target); err != nil {
 		m.failSync(service, requestID, err)
-		return nil, false, unprocessable("upgrade_failed", err)
+		return nil, false, unprocessable(operation+"_failed", err)
 	}
 	service.Phase, service.UpdatedAt = "waiting_for_health", time.Now().UTC()
 	service.Deploy[target] = withHealth(service.Deploy[target], "checking")
@@ -1127,22 +1147,26 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		m.failSync(service, requestID, err)
 		return nil, false, internal(err)
 	}
-	go m.finishHealth(service, "upgrade", requestID, attempt)
+	go m.finishHealth(service, operation, requestID, attempt)
 	status, err := m.status(ctx, service)
 	return status, true, err
 }
 
+func replaceableActivation(service model.Service) bool {
+	return (service.Phase == "waiting_for_health" || service.Phase == "failed") && (service.Operation == "provision" || service.Operation == "resume")
+}
+
 func validateUpgrade(service model.Service, req model.UpgradeRequest, forceRedeploy bool) (bool, error) {
-	if service.State != model.Active {
-		return false, conflict(errors.New("only active services can be upgraded"))
+	if service.State != model.Active && !replaceableActivation(service) {
+		return false, conflict(errors.New("only active services or pending activations can be upgraded"))
 	}
-	if service.Phase == "failed" && service.Operation != "upgrade" {
+	if service.Phase == "failed" && service.Operation != "upgrade" && !replaceableActivation(service) {
 		return false, conflict(errors.New("retry the failed lifecycle operation before upgrading"))
 	}
-	if busy(service.Phase) && !(service.Phase == "waiting_for_health" && service.Operation == "upgrade") {
+	if busy(service.Phase) && service.Phase != "waiting_for_health" {
 		return false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
 	}
-	if req.Version == service.Version && !forceRedeploy && service.Phase != "waiting_for_health" {
+	if req.Version == service.Version && !forceRedeploy && service.Phase != "waiting_for_health" && !replaceableActivation(service) {
 		return true, nil
 	}
 	cmp, ordered := dockeradapter.CompareVersions(req.Version, service.Version)
@@ -1169,16 +1193,14 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 	target = service.TargetDeploy
 	dnsDomain, dnsIPv4 := service.MainDomain, service.PublicIPv4
 	oldDomain, oldIPv4 := "", ""
-	if operation == "upgrade" {
-		if service.TargetMainDomain != "" {
-			dnsDomain = service.TargetMainDomain
-			if dnsDomain != service.MainDomain {
-				oldDomain, oldIPv4 = service.MainDomain, service.PublicIPv4
-			}
+	if service.TargetMainDomain != "" {
+		dnsDomain = service.TargetMainDomain
+		if dnsDomain != service.MainDomain {
+			oldDomain, oldIPv4 = service.MainDomain, service.PublicIPv4
 		}
-		if service.TargetPublicIPv4 != "" {
-			dnsIPv4 = service.TargetPublicIPv4
-		}
+	}
+	if service.TargetPublicIPv4 != "" {
+		dnsIPv4 = service.TargetPublicIPv4
 	}
 	if healthErr != nil {
 		service.Deploy[target] = withHealth(service.Deploy[target], "unhealthy")
@@ -1222,7 +1244,7 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 			return
 		}
 	}
-	if err := m.Caddy.Active(ctx, service.ID, routingDomains(service, operation), target, deploymentSocketName(service, target)); err != nil {
+	if err := m.Caddy.Active(ctx, service.ID, routingDomains(service), target, deploymentSocketName(service, target)); err != nil {
 		m.failDeferred(service, requestID, err)
 		return
 	}
@@ -1235,14 +1257,14 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 			m.Logger.Warn("remove previous resume cache", "service_id", service.ID, "slot", service.LiveDeploy, "error", err)
 		}
 	}
+	if service.TargetMainDomain != "" {
+		service.MainDomain, service.StagingDomain = service.TargetMainDomain, service.TargetStagingDomain
+		service.TargetMainDomain, service.TargetStagingDomain = "", ""
+	}
+	if service.TargetPublicIPv4 != "" {
+		service.PublicIPv4, service.TargetPublicIPv4 = service.TargetPublicIPv4, ""
+	}
 	if operation == "upgrade" {
-		if service.TargetMainDomain != "" {
-			service.MainDomain, service.StagingDomain = service.TargetMainDomain, service.TargetStagingDomain
-			service.TargetMainDomain, service.TargetStagingDomain = "", ""
-		}
-		if service.TargetPublicIPv4 != "" {
-			service.PublicIPv4, service.TargetPublicIPv4 = service.TargetPublicIPv4, ""
-		}
 		service.Phase, service.UpdatedAt = "draining", time.Now().UTC()
 		if !m.putDeferred(service) {
 			return
@@ -1260,8 +1282,14 @@ func (m *Manager) finishHealth(service model.Service, operation, requestID strin
 			return
 		}
 		service.LiveDeploy, service.Version, service.Package = target, service.TargetVersion, service.TargetPackage
-	} else if operation == "resume" {
-		service.State, service.LiveDeploy, service.Package = model.Active, target, service.TargetPackage
+	} else {
+		service.State, service.LiveDeploy = model.Active, target
+		if service.TargetVersion != "" {
+			service.Version = service.TargetVersion
+		}
+		if service.TargetPackage != nil {
+			service.Package = service.TargetPackage
+		}
 	}
 	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.TargetPublicIPv4, service.TargetPackage, service.LastError, service.UpdatedAt = "running", "", "", "", "", "", "", nil, "", time.Now().UTC()
 	if !m.putDeferred(service) {
@@ -1293,7 +1321,7 @@ func (m *Manager) finishRouting(id, operation, requestID string) {
 		m.failDeferred(service, requestID, err)
 		return
 	}
-	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.LastError, service.UpdatedAt = "stopped", "", "", "", "", "", "", time.Now().UTC()
+	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion, service.TargetMainDomain, service.TargetStagingDomain, service.TargetPublicIPv4, service.TargetPackage, service.LastError, service.UpdatedAt = "stopped", "", "", "", "", "", "", nil, "", time.Now().UTC()
 	for slot, deploy := range service.Deploy {
 		service.Deploy[slot] = withHealth(deploy, "unknown")
 	}
@@ -1333,7 +1361,9 @@ func (m *Manager) nextHealthAttempt(id string) uint64 {
 	if m.healthAttempts == nil {
 		m.healthAttempts = map[string]uint64{}
 	}
-	m.healthAttempts[id]++
+	// Completed or abandoned attempts must never match a later deployment.
+	m.healthSequence++
+	m.healthAttempts[id] = m.healthSequence
 	return m.healthAttempts[id]
 }
 
@@ -2271,8 +2301,8 @@ func domains(service model.Service) []string {
 	return domains
 }
 
-func routingDomains(service model.Service, operation string) []string {
-	if operation == "upgrade" && service.TargetMainDomain != "" {
+func routingDomains(service model.Service) []string {
+	if service.TargetMainDomain != "" {
 		service.MainDomain, service.StagingDomain = service.TargetMainDomain, service.TargetStagingDomain
 	}
 	return domains(service)

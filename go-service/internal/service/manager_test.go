@@ -22,6 +22,7 @@ import (
 	"github.com/moddengine/whmcs-container-controller/internal/config"
 	dockeradapter "github.com/moddengine/whmcs-container-controller/internal/docker"
 	"github.com/moddengine/whmcs-container-controller/internal/healthcheck"
+	"github.com/moddengine/whmcs-container-controller/internal/metrics"
 	"github.com/moddengine/whmcs-container-controller/internal/model"
 	"github.com/moddengine/whmcs-container-controller/internal/notify"
 	"github.com/moddengine/whmcs-container-controller/internal/state"
@@ -194,18 +195,16 @@ func TestDeployDomainsUpdatesSuspendedRoute(t *testing.T) {
 
 func TestRoutingDomainsUsesPendingHostname(t *testing.T) {
 	service := model.Service{MainDomain: "old.example.com", StagingDomain: "old.staging.test", TargetMainDomain: "new.example.com", TargetStagingDomain: "new.staging.test"}
-	if got := routingDomains(service, "upgrade"); !reflect.DeepEqual(got, []string{service.TargetMainDomain, "www." + service.TargetMainDomain, service.TargetStagingDomain}) {
+	if got := routingDomains(service); !reflect.DeepEqual(got, []string{service.TargetMainDomain, "www." + service.TargetMainDomain, service.TargetStagingDomain}) {
 		t.Fatalf("routingDomains() = %#v", got)
 	}
-	if got := routingDomains(service, "resume"); !reflect.DeepEqual(got, []string{service.MainDomain, "www." + service.MainDomain, service.StagingDomain}) {
-		t.Fatalf("resume used pending hostname: %#v", got)
-	}
 	service.StagingDomain, service.TargetStagingDomain = "", ""
-	if got := routingDomains(service, "resume"); !reflect.DeepEqual(got, []string{service.MainDomain, "www." + service.MainDomain}) {
-		t.Fatalf("resume routed empty staging hostname: %#v", got)
+	if got := routingDomains(service); !reflect.DeepEqual(got, []string{service.TargetMainDomain, "www." + service.TargetMainDomain}) {
+		t.Fatalf("routed empty staging hostname: %#v", got)
 	}
-	if got := routingDomains(service, "upgrade"); !reflect.DeepEqual(got, []string{service.TargetMainDomain, "www." + service.TargetMainDomain}) {
-		t.Fatalf("upgrade routed empty staging hostname: %#v", got)
+	service.TargetMainDomain = ""
+	if got := routingDomains(service); !reflect.DeepEqual(got, []string{service.MainDomain, "www." + service.MainDomain}) {
+		t.Fatalf("routing without pending hostname: %#v", got)
 	}
 }
 
@@ -1182,6 +1181,267 @@ func TestHealthyUpgradeRemovesOldSlotFromPersistentAndScratchStorage(t *testing.
 			got, err := repo.Get(service.ID)
 			if err != nil || got.Phase != "running" || got.LiveDeploy != target {
 				t.Fatalf("completed upgrade = %#v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestReplacementActivationRequiresHealthBeforeGoingLive(t *testing.T) {
+	for _, pending := range []struct{ operation, state string }{{"provision", model.Active}, {"resume", model.Suspended}, {"resume", model.Terminated}} {
+		for _, healthy := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/%s/healthy=%t", pending.operation, pending.state, healthy), func(t *testing.T) {
+				root := t.TempDir()
+				socket := filepath.Join(root, "health.sock")
+				listener, err := net.Listen("unix", socket)
+				if err != nil {
+					t.Fatal(err)
+				}
+				server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if healthy {
+						w.WriteHeader(http.StatusNoContent)
+					} else {
+						w.WriteHeader(http.StatusServiceUnavailable)
+					}
+				})}
+				go server.Serve(listener)
+				t.Cleanup(func() { _ = server.Close() })
+				repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+				if err := repo.Init(); err != nil {
+					t.Fatal(err)
+				}
+				service := model.Service{ID: "whmcs-123", State: pending.state, Phase: "waiting_for_health", Operation: pending.operation,
+					Version: "v1", TargetVersion: "v3", LiveDeploy: "blue", TargetDeploy: "green", MainDomain: "old.example.com",
+					TargetMainDomain: "fixed.example.com", TargetStagingDomain: "fixed.staging.test", TargetPublicIPv4: "203.0.113.11",
+					TargetPackage: map[string]string{"plan": "fixed"}, Deploy: map[string]model.Deploy{"green": {Socket: socket, Version: "v3", Health: "checking"}},
+				}
+				if err := repo.Put(service); err != nil {
+					t.Fatal(err)
+				}
+				manager := Manager{Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{},
+					Caddy:          caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{hostnames} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+					healthAttempts: map[string]uint64{service.ID: 2},
+				}
+				// Even a successful result from the abandoned candidate cannot route the replacement.
+				manager.finishHealth(service, pending.operation, "abandoned", 1)
+				if configured, _, _, err := manager.Caddy.Status(service.ID); err != nil || configured {
+					t.Fatalf("stale attempt routed service: configured=%t err=%v", configured, err)
+				}
+				manager.finishHealth(service, pending.operation, "replacement", 2)
+				got, err := repo.Get(service.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				configured, _, _, err := manager.Caddy.Status(service.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !healthy {
+					if configured || got.Phase != "failed" || got.State != pending.state || got.Version != "v1" {
+						t.Fatalf("unhealthy candidate went live: %#v configured=%t", got, configured)
+					}
+					return
+				}
+				if !configured || got.State != model.Active || got.Phase != "running" || got.Version != "v3" || got.LiveDeploy != "green" || got.MainDomain != "fixed.example.com" || got.PublicIPv4 != "203.0.113.11" || got.Package["plan"] != "fixed" {
+					t.Fatalf("healthy replacement: %#v configured=%t", got, configured)
+				}
+				content, err := os.ReadFile(manager.Caddy.Path(service.ID))
+				if err != nil || !strings.Contains(string(content), "fixed.example.com") || strings.Contains(string(content), "old.example.com") {
+					t.Fatalf("replacement routing=%q err=%v", content, err)
+				}
+			})
+		}
+	}
+}
+
+func TestDeployReplacementChecksImageBeforeAbandoningCandidate(t *testing.T) {
+	for _, pending := range []struct{ operation, state string }{
+		{"provision", model.Active}, {"upgrade", model.Active}, {"resume", model.Suspended}, {"resume", model.Terminated},
+	} {
+		for _, phase := range []string{"waiting_for_health", "failed"} {
+			t.Run(pending.operation+"/"+pending.state+"/"+phase, func(t *testing.T) {
+				root := t.TempDir()
+				repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+				if err := repo.Init(); err != nil {
+					t.Fatal(err)
+				}
+				service := model.Service{ID: "whmcs-123", State: pending.state, Phase: phase, Operation: pending.operation,
+					Version: "v1", TargetVersion: "v2", MainDomain: "example.com", PublicIPv4: "203.0.113.10"}
+				if err := repo.Put(service); err != nil {
+					t.Fatal(err)
+				}
+				var checked atomic.Bool
+				dockerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/images/json") {
+						checked.Store(true)
+						io.WriteString(w, `[]`)
+						return
+					}
+					t.Errorf("unexpected Docker mutation/request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}))
+				defer dockerAPI.Close()
+				t.Setenv("DOCKER_HOST", dockerAPI.URL)
+				t.Setenv("DOCKER_API_VERSION", "1.52")
+				docker, err := dockeradapter.New(config.Docker{ImageRepository: "runtime"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer docker.Close()
+				manager := Manager{Repo: repo, Docker: docker}
+				for _, requested := range []struct {
+					version string
+					force   bool
+				}{{"v3", true}, {"v1", true}, {"v1", false}} {
+					if !requested.force && pending.operation == "upgrade" {
+						continue
+					}
+					checked.Store(false)
+					_, _, err = manager.Provision(t.Context(), service.ID, model.ProvisionRequest{MainDomain: service.MainDomain, PublicIPv4: service.PublicIPv4, Version: requested.version, ForceRedeploy: requested.force}, "replace")
+					var apiErr *Error
+					if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound || !checked.Load() {
+						t.Fatalf("replacement image validation: %v, checked=%t", err, checked.Load())
+					}
+					got, err := repo.Get(service.ID)
+					if err != nil || !reflect.DeepEqual(got, service) {
+						t.Fatalf("candidate changed before image validation: %#v, %v", got, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStopAbandonsDeploymentWaitingForHealth(t *testing.T) {
+	for _, pending := range []struct{ operation, state string }{
+		{"provision", model.Active}, {"upgrade", model.Active}, {"resume", model.Suspended}, {"resume", model.Terminated},
+	} {
+		for _, target := range []string{model.Suspended, model.Terminated} {
+			t.Run(pending.operation+"/"+pending.state+"/"+target, func(t *testing.T) {
+				root := t.TempDir()
+				repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+				if err := repo.Init(); err != nil {
+					t.Fatal(err)
+				}
+				var stops, removes atomic.Int32
+				dockerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/json"):
+						io.WriteString(w, `[{"Id":"candidate","Labels":{"au.modd.managed":"true","au.modd.service-id":"whmcs-123","au.modd.deploy":"green"},"State":"running"}]`)
+					case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/candidate/json"):
+						io.WriteString(w, `{"Id":"candidate","Config":{"Labels":{"au.modd.managed":"true","au.modd.service-id":"whmcs-123"}}}`)
+					case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/containers/candidate/stop"):
+						stops.Add(1)
+						w.WriteHeader(http.StatusNoContent)
+					case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/containers/candidate"):
+						removes.Add(1)
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer dockerAPI.Close()
+				t.Setenv("DOCKER_HOST", dockerAPI.URL)
+				t.Setenv("DOCKER_API_VERSION", "1.52")
+				docker, err := dockeradapter.New(config.Docker{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer docker.Close()
+				mountpoint := filepath.Join(root, "site")
+				if err := os.MkdirAll(mountpoint, 0750); err != nil {
+					t.Fatal(err)
+				}
+				data := filepath.Join(mountpoint, "customer-data")
+				if err := os.WriteFile(data, []byte("keep"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				service := model.Service{ID: "whmcs-123", State: pending.state, Phase: "waiting_for_health", Operation: pending.operation,
+					MainDomain: "example.com", Version: "v1", TargetVersion: "v2", LiveDeploy: "blue", TargetDeploy: "green",
+					Dataset: model.DatasetRecord{Mountpoint: mountpoint}, Deploy: map[string]model.Deploy{"green": {Health: "checking"}},
+					TargetPackage: map[string]string{"plan": "pending"}, TargetPublicIPv4: "203.0.113.12",
+				}
+				if err := repo.Put(service); err != nil {
+					t.Fatal(err)
+				}
+				manager := Manager{Context: t.Context(), Repo: repo, Docker: docker, Metrics: metrics.Mock{}, Notify: notify.Disabled{},
+					Config: config.Config{Server: config.Server{RequestTimeout: time.Second}},
+					ZFS:    zfs.Adapter{ScratchMountpoint: filepath.Join(root, "scratch")},
+					Caddy:  caddy.Adapter{Dir: filepath.Join(root, "caddy"), SuspensionRoot: "/suspended", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
+					Health: healthcheck.Checker{Attempts: 1}, healthSequence: 1, healthAttempts: map[string]uint64{service.ID: 1},
+				}
+				action := manager.Suspend
+				if target == model.Terminated {
+					action = manager.Terminate
+				}
+				if _, accepted, err := action(t.Context(), service.ID, "stop"); err != nil || !accepted {
+					t.Fatalf("stop accepted=%t: %v", accepted, err)
+				}
+				for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+					got, err := repo.Get(service.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.Phase == "stopped" {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("stop did not finish: %#v", got)
+					}
+				}
+				// A late failed health result must not revive or fail the stopped service.
+				manager.finishHealth(service, pending.operation, "stale", 1)
+				got, err := repo.Get(service.ID)
+				if err != nil || got.State != target || got.Phase != "stopped" || got.Operation != "" || got.TargetPackage != nil || got.TargetPublicIPv4 != "" {
+					t.Fatalf("stopped service: %#v, %v", got, err)
+				}
+				if target == model.Suspended && stops.Load() != 1 || target == model.Terminated && removes.Load() != 1 {
+					t.Fatalf("stops=%d removes=%d", stops.Load(), removes.Load())
+				}
+				if body, err := os.ReadFile(data); err != nil || string(body) != "keep" {
+					t.Fatalf("customer data changed: %q, %v", body, err)
+				}
+				// A subsequent resume must not reuse the abandoned attempt number.
+				service.State, service.Operation, service.TargetVersion = target, "resume", "v3"
+				manager.mu.Lock()
+				err = repo.Put(service)
+				manager.nextHealthAttempt(service.ID)
+				manager.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				manager.finishHealth(service, "resume", "older-resume", 1)
+				got, err = repo.Get(service.ID)
+				if err != nil || got.Phase != "waiting_for_health" || got.TargetVersion != "v3" || got.Deploy["green"].Health != "checking" {
+					t.Fatalf("abandoned result changed a subsequent resume: %#v, %v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestLifecycleChangesRejectOtherBusyPhases(t *testing.T) {
+	for _, phase := range []string{"provisioning", "starting", "routing", "draining", "stopping", "deleting"} {
+		t.Run(phase, func(t *testing.T) {
+			root := t.TempDir()
+			repo := state.New(filepath.Join(root, "services"), filepath.Join(root, "tombstones"))
+			if err := repo.Init(); err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.Put(model.Service{ID: "whmcs-123", State: model.Active, Phase: phase, Operation: "upgrade"}); err != nil {
+				t.Fatal(err)
+			}
+			manager := Manager{Repo: repo}
+			for _, action := range []func(context.Context, string, string) (*model.Status, bool, error){manager.Suspend, manager.Terminate} {
+				_, _, err := action(t.Context(), "whmcs-123", "stop")
+				var apiErr *Error
+				if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict {
+					t.Fatalf("%s: %v", phase, err)
+				}
+			}
+			_, _, err := manager.Provision(t.Context(), "whmcs-123", model.ProvisionRequest{MainDomain: "example.com", PublicIPv4: "203.0.113.10", Version: "v3", ForceRedeploy: true}, "replace")
+			var apiErr *Error
+			if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict {
+				t.Fatalf("Deploy during %s: %v", phase, err)
 			}
 		})
 	}

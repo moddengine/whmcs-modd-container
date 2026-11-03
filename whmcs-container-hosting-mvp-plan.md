@@ -1897,6 +1897,16 @@ Inject failure at:
 
 Verify all applicable artifacts remain for debugging.
 
+### Replace a pending deployment
+
+- While initial provisioning is waiting for health, deploy a fixed image immediately.
+- Replace only the pending container; retain the dataset and customer files.
+- Keep Caddy unconfigured until the replacement passes its own health check.
+- A late success or failure from the abandoned attempt cannot change state or routing.
+- Record the replacement version, package, domains, and IPv4 only after activation.
+- An unavailable replacement image leaves the pending deployment untouched.
+- Repeat after health failure, including a forced retry of the same version.
+
 ## 23.5 Suspend tests
 
 - Active container stops.
@@ -1905,12 +1915,16 @@ Verify all applicable artifacts remain for debugging.
 - TOML says suspended.
 - Repeated suspend is safe.
 - Chat notification is emitted.
+- Suspend during provision, resume, or upgrade health checks stops all containers immediately and serves the suspension page.
+- The abandoned health result cannot reactivate the service or mark suspension failed.
+- A pending resume from terminated can also be suspended; retained data remains intact.
+- Suspend during starting, routing, or draining remains rejected.
 
 ## 23.6 Resume tests
 
 ### From suspended
 
-- Current deployment starts.
+- Current version starts in the opposite blue/green slot.
 - Health passes.
 - Caddy returns to proxy mode.
 - TOML says active.
@@ -1928,6 +1942,14 @@ Verify all applicable artifacts remain for debugging.
 - Caddy is not switched to it.
 - Previous state remains.
 
+### Replace a pending resume
+
+- From both suspended and terminated, start an unhealthy resume and deploy a fixed version before health checks finish.
+- Keep the suspension page or absent route until the fixed version passes health.
+- Confirm the fixed version becomes active and the previous slot is removed.
+- Repeat after health failure and with another replacement before the first replacement finishes.
+- Suspend or terminate, start a new resume, and release an old successful health result: the new resume must remain gated by its own check.
+
 ## 23.7 Terminate tests
 
 - Both blue and green containers are removed.
@@ -1937,6 +1959,10 @@ Verify all applicable artifacts remain for debugging.
 - TOML says terminated.
 - Resume from terminated works.
 - Chat notification emitted.
+- Terminate during provision, resume, or upgrade health checks removes both containers and routing without waiting for health failure.
+- The abandoned health result cannot restore routing or overwrite the terminated state.
+- Repeated termination during a resume from terminated still removes the pending container.
+- Terminate during starting, routing, or draining remains rejected.
 
 ## 23.8 Delete tests
 
@@ -1977,6 +2003,15 @@ Repeat inverse flow.
 - Previous Caddyfile restored.
 - Both containers remain for debugging.
 - Old deployment remains live.
+
+### Replace a candidate before health finishes
+
+- Start an unhealthy upgrade, then deploy a fixed version without waiting for failure.
+- The old healthy deployment keeps serving throughout replacement and its health checks.
+- The abandoned container is replaced and its late health results are ignored.
+- Only the fixed version's successful health check permits Caddy switching.
+- An unavailable image or unconfirmed downgrade leaves the pending candidate untouched.
+- Replacement during starting, routing, or draining is rejected.
 
 ### Downgrade
 

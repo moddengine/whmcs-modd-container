@@ -40,6 +40,8 @@ passwordless sudo:
 
 The test installs the candidate, builds a tiny scratch image, and verifies
 provisioning, host ownership, the container UID/GID, termination, and purge.
+It also replaces unhealthy provisioning, resume, and upgrade candidates without
+waiting for health failure, and aborts pending deployments with suspend or terminate.
 Set `CONTROLLER_PATH`, `API_URL`, `TOKEN_PATH`, `SITE_ROOT`, `IMAGE_VERSION`,
 or `SERVICE_ID` when the test host differs from the playbook layout.
 

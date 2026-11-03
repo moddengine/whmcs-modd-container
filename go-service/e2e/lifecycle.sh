@@ -121,7 +121,9 @@ sudo docker inspect "$unhealthy_container" >/dev/null 2>&1 || {
 }
 test "$(sudo docker inspect -f '{{.State.Running}}' "$unhealthy_container")" = true
 test ! -S "$socket_root/$unhealthy_service_id-green/http.sock"
-wait_phase "$unhealthy_service_id" failed
+request "$api/services/$unhealthy_service_id" > /tmp/modd-e2e-pending.json
+grep -q '"phase":"waiting_for_health"' /tmp/modd-e2e-pending.json
+grep -q '"live_deploy":"blue"' /tmp/modd-e2e-pending.json
 old_unhealthy_id=$(sudo docker inspect -f '{{.Id}}' "$unhealthy_container")
 
 request -X POST -H 'Content-Type: application/json' \
@@ -132,7 +134,51 @@ wait_phase "$unhealthy_service_id" running
 test "$(sudo docker inspect -f '{{.Id}}' "$unhealthy_container")" != "$old_unhealthy_id"
 test "$(sudo docker ps -a --filter "label=au.modd.service-id=$unhealthy_service_id" -q | wc -l)" = 1
 test "$(sudo docker ps --filter "label=au.modd.service-id=$unhealthy_service_id" -q | wc -l)" = 1
-echo 'unhealthy deployment replacement check passed'
+echo 'unhealthy upgrade replaced without waiting for failure'
+
+# Stop an upgrade while its candidate is still waiting for health.
+request -X POST -H 'Content-Type: application/json' \
+	-d "{\"version\":\"$unhealthy_version\",\"confirm_downgrade\":true}" \
+	"$api/services/$unhealthy_service_id/upgrade" > /tmp/modd-e2e-pending-suspend.json
+grep -q '"phase":"waiting_for_health"' /tmp/modd-e2e-pending-suspend.json
+request -X POST "$api/services/$unhealthy_service_id/suspend" > /tmp/modd-e2e-suspend.json
+wait_phase "$unhealthy_service_id" stopped
+test -z "$(sudo docker ps --filter "label=au.modd.service-id=$unhealthy_service_id" -q)"
+request -X POST "$api/services/$unhealthy_service_id/resume" > /tmp/modd-e2e-resume.json
+wait_phase "$unhealthy_service_id" running
+echo 'suspend abandons an unhealthy upgrade and retains the last healthy version'
+
+for action in suspend terminate; do
+	request -X POST "$api/services/$unhealthy_service_id/terminate" > /tmp/modd-e2e-before-resume.json
+	wait_phase "$unhealthy_service_id" stopped
+	request -X PUT -H 'Content-Type: application/json' \
+		-d "{\"main_domain\":\"$unhealthy_service_id.test\",\"public_ipv4\":\"$public_ipv4\",\"version\":\"$unhealthy_version\"}" \
+		"$api/services/$unhealthy_service_id" > /tmp/modd-e2e-bad-resume.json
+	grep -q '"phase":"waiting_for_health"' /tmp/modd-e2e-bad-resume.json
+	grep -q '"operation":"resume"' /tmp/modd-e2e-bad-resume.json
+	grep -q '"configured":false' /tmp/modd-e2e-bad-resume.json
+	request -X POST "$api/services/$unhealthy_service_id/$action" > /tmp/modd-e2e-abort-resume.json
+	wait_phase "$unhealthy_service_id" stopped
+	test -z "$(sudo docker ps --filter "label=au.modd.service-id=$unhealthy_service_id" -q)"
+	sudo test -d "$site_root/$unhealthy_service_id/site"
+	# Resume the retained bad version, then replace it before it can become healthy.
+	request -X POST "$api/services/$unhealthy_service_id/resume" > /tmp/modd-e2e-retry-resume.json
+	grep -q '"phase":"waiting_for_health"' /tmp/modd-e2e-retry-resume.json
+	request -X POST -H 'Content-Type: application/json' \
+		-d "{\"version\":\"$upgrade_version\",\"confirm_downgrade\":true}" \
+		"$api/services/$unhealthy_service_id/upgrade" > /tmp/modd-e2e-replace-resume.json
+	grep -q '"operation":"resume"' /tmp/modd-e2e-replace-resume.json
+	if [[ $action == suspend ]]; then
+		grep -q '"mode":"suspended"' /tmp/modd-e2e-replace-resume.json
+	else
+		grep -q '"configured":false' /tmp/modd-e2e-replace-resume.json
+	fi
+	wait_phase "$unhealthy_service_id" running
+	request "$api/services/$unhealthy_service_id" > /tmp/modd-e2e-fixed-resume.json
+	grep -q "\"version\":\"$upgrade_version\"" /tmp/modd-e2e-fixed-resume.json
+	test "$(sudo docker ps -a --filter "label=au.modd.service-id=$unhealthy_service_id" -q | wc -l)" = 1
+	echo "$action aborts a pending resume; a later resume accepts a fixed version immediately"
+done
 
 request -X POST "$api/services/$unhealthy_service_id/terminate" > /tmp/modd-e2e-unhealthy-terminate.json
 wait_phase "$unhealthy_service_id" stopped
@@ -140,3 +186,24 @@ test -z "$(sudo docker ps -a --filter "label=au.modd.service-id=$unhealthy_servi
 request -X DELETE "$api/services/$unhealthy_service_id" > /tmp/modd-e2e-unhealthy-delete.json
 grep -q '"state":"deleted"' /tmp/modd-e2e-unhealthy-delete.json
 echo 'unhealthy deployment cleanup checks passed'
+
+pending_service_id=whmcs-$((10#${service_id#whmcs-} + 2))
+request -X PUT -H 'Content-Type: application/json' \
+	-d "{\"main_domain\":\"$pending_service_id.test\",\"public_ipv4\":\"$public_ipv4\",\"version\":\"$unhealthy_version\"}" \
+	"$api/services/$pending_service_id" > /tmp/modd-e2e-bad-provision.json
+grep -q '"phase":"waiting_for_health"' /tmp/modd-e2e-bad-provision.json
+grep -q '"configured":false' /tmp/modd-e2e-bad-provision.json
+request -X POST -H 'Content-Type: application/json' \
+	-d "{\"version\":\"$upgrade_version\",\"confirm_downgrade\":true}" \
+	"$api/services/$pending_service_id/upgrade" > /tmp/modd-e2e-replace-provision.json
+grep -q '"operation":"provision"' /tmp/modd-e2e-replace-provision.json
+grep -q '"configured":false' /tmp/modd-e2e-replace-provision.json
+wait_phase "$pending_service_id" running
+request "$api/services/$pending_service_id" > /tmp/modd-e2e-fixed-provision.json
+grep -q "\"version\":\"$upgrade_version\"" /tmp/modd-e2e-fixed-provision.json
+test "$(sudo docker ps -a --filter "label=au.modd.service-id=$pending_service_id" -q | wc -l)" = 1
+request -X POST "$api/services/$pending_service_id/terminate" > /tmp/modd-e2e-pending-terminate.json
+wait_phase "$pending_service_id" stopped
+request -X DELETE "$api/services/$pending_service_id" > /tmp/modd-e2e-pending-delete.json
+grep -q '"state":"deleted"' /tmp/modd-e2e-pending-delete.json
+echo 'initial provisioning accepts a fixed version without waiting for failure'
