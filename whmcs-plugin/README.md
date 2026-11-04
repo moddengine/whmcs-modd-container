@@ -75,11 +75,30 @@ Configure the addon's shared **Matomo URL** and **Matomo API Token** (`matomoUrl
 and `matomoToken`) to enable automatic site creation on WHMCS **Create** or
 **Deploy** when the ID is blank. Use a token belonging to a Matomo superuser
 (a POST-only token is recommended). The token stays in WHMCS; it is not sent
-to controllers or containers. Provisioning continues if Matomo fails; inspect
-the WHMCS module log for errors. Clearing an ID allows the next Deploy to
+to controllers or containers. New sites are named exactly `example.com #123`
+(normalized main hostname plus WHMCS service ID). Their URL list contains the
+full HTTPS main hostname and the full HTTPS staging hostname when enabled;
+**Only Track Visits matching URLs** is enabled at creation. Each subsequent
+WHMCS Create/Deploy (including package changes) synchronizes that same site's
+name and replaces its URL list, removing old main or staging hostnames. Existing
+tracking restrictions and imported site groups are preserved. Unsuspend only
+forwards the saved ID and never calls Matomo.
+
+Provisioning continues if Matomo synchronization fails. An already assigned ID
+still reaches the controller. Next to the ID, **Status: Not Configured** means
+no synchronization has completed since the ID was assigned, **Status: OK** means
+the last sync succeeded, and **Error:** shows the last failure. The nullable
+`matomo_last_error` column stores these states as NULL, an empty string, or a
+bounded error message respectively. Errors also reach the WHMCS module log;
+tokens are redacted before storage or logging. Replacing/clearing an ID resets
+its status; saving the same ID preserves it. Clearing an ID allows the next Deploy to
 create another remote site; it does not delete the previous Matomo site.
 An uncertain creation result leaves a pending attempt to prevent duplicates.
-Check Matomo for the site and enter its ID before retrying. An ordinary Save
+The random attempt marker is saved in the new Matomo site's group and retained
+after success. Deploy recovers only an exact group match, or an exact site-name
+match for pending creations made by older module versions. Recovered IDs are
+saved before renaming the site. Check Matomo for the displayed marker and enter
+its ID if automatic recovery cannot find exactly one site. An ordinary Save
 of an unchanged blank ID preserves that marker; use the explicit reset checkbox
 only after resolving the previous attempt. An explicit API blank also resets it.
 

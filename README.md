@@ -300,6 +300,8 @@ page; the next **Deploy** or **Unsuspend** passes it to the container as
 `ME_CONF__matomo__id`. Configure the shared Matomo URL and API token in the
 addon to create missing IDs during **Create/Deploy**. Import existing IDs
 before enabling automatic creation; see the [WHMCS module guide](whmcs-plugin/README.md).
+Create/Deploy also synchronizes the Matomo name and allowed hostname URLs;
+the Matomo ID field shows the latest synchronization status.
 
 ## Development
 

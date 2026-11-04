@@ -11,6 +11,7 @@ namespace WHMCS\Database {
         public static bool $busy = false;
         public static bool $failIdWrite = false;
         public static bool $failMarkerWrite = false;
+        public static bool $failStatusWrite = false;
         public static function table(string $table): QueryBuilder { return new QueryBuilder($table); }
         public static function connection(): Connection { return new Connection(); }
         }
@@ -54,7 +55,7 @@ namespace WHMCS\Database {
         }
         public function update(array $values): int
         {
-            if (array_key_exists("matomo_id", $values) || array_key_exists("matomo_attempt", $values)) {
+            if (array_key_exists("matomo_id", $values) || array_key_exists("matomo_attempt", $values) || array_key_exists("matomo_last_error", $values)) {
                 assert(Capsule::$locked, "Matomo write outside the shared lock");
             }
             if (Capsule::$failMarkerWrite && isset($values["matomo_attempt"])) {
@@ -62,6 +63,9 @@ namespace WHMCS\Database {
             }
             if (Capsule::$failIdWrite && isset($values["matomo_id"])) {
                 throw new \RuntimeException("ID write failed");
+            }
+            if (Capsule::$failStatusWrite && array_key_exists("matomo_last_error", $values)) {
+                throw new \RuntimeException("status write failed");
             }
             $id = $this->filters["service_id"];
             Capsule::$services[$id] = array_merge(Capsule::$services[$id] ?? [], $values);
@@ -89,10 +93,22 @@ namespace ModdHosting {
             parse_str($options[CURLOPT_POSTFIELDS], $body);
             assert($body["token_auth"] === "secret-token");
             if ($body["method"] === "SitesManager.addSite") {
-                assert(\WHMCS\Database\Capsule::$services[123]["matomo_attempt"] === $body["siteName"], "marker missing before request");
-                assert($body["urls"] === "https://example.com");
+                assert(\WHMCS\Database\Capsule::$services[123]["matomo_attempt"] === $body["group"], "marker missing before request");
+                assert($body["siteName"] === "example.com #123");
+                assert($body["excludeUnknownUrls"] === "1");
+                assert($body["urls"][0] === "https://example.com");
             }
             $GLOBALS["matomoRequests"][] = $body;
+            if ($body["method"] === "SitesManager.updateSite" || $body["method"] === "SitesManager.setSiteAliasUrls") {
+                assert(!isset($body["group"]) && !isset($body["excludeUnknownUrls"]));
+                assert(\WHMCS\Database\Capsule::$services[123]["matomo_id"] === (int) $body["idSite"], "sync before saving site ID");
+                $next = array_shift($GLOBALS["updateResponses"]);
+                [$GLOBALS["curlStatus"], $response] = $next ?? [200, $body["method"] === "SitesManager.setSiteAliasUrls" ? "0" : "{\"result\":\"success\"}"];
+                if ($response instanceof \Throwable) {
+                    throw $response;
+                }
+                return $response;
+            }
             assert($GLOBALS["responses"] !== [], "unexpected Matomo request");
             $next = array_shift($GLOBALS["responses"]);
             [$GLOBALS["curlStatus"], $response] = $next;
@@ -133,33 +149,87 @@ namespace {
     }
     require_once dirname(__DIR__) . "/modules/servers/moddhosting/moddhosting.php";
     $params = ["serviceid" => 123, "domain" => "Example.COM.", "serverhostname" => "controller.example", "serverip" => "192.0.2.1", "serverpassword" => "controller-token"];
-    $responses = $matomoRequests = $controllerRequests = $moduleCalls = [];
+    $responses = $updateResponses = $matomoRequests = $controllerRequests = $moduleCalls = [];
 
     Capsule::$services = [123 => ["image_version" => "v1", "staging_label" => ""]];
+    assert(str_contains(moddhosting_matomo_field($params), "Status: Not Configured"));
 
     foreach ([0, -1, 1.5, true, "0", "-1", "1.0", "4294967296", [], " 1"] as $invalid) {
         assert(moddhosting_updateConfig($params + ["matomo_id" => $invalid]) !== "success");
     }
     assert(moddhosting_updateConfig($params + ["matomo_id" => "4294967295"]) === "success");
     assert(Capsule::$services[123]["matomo_id"] === 4294967295);
-    assert(moddhosting_matomo_id($params, true) === 4294967295);
+    assert(str_contains(moddhosting_matomo_field($params), "Status: Not Configured"));
+    assert(moddhosting_matomo_id($params, false) === 4294967295);
     assert($matomoRequests === []);
     assert(moddhosting_updateConfig($params + ["matomo_id" => ""]) === "success");
     assert(moddhosting_matomo_id($params, false) === 0); // Unsuspend never creates.
     assert($matomoRequests === []);
 
+    Capsule::$services[123]["staging_label"] = "preview";
     $responses = [[200, "71"]];
     assert(moddhosting_CreateAccount($params) === "success");
     assert(Capsule::$services[123]["matomo_id"] === 71);
+    assert(end($matomoRequests)["siteName"] === "example.com #123");
+    assert(end($matomoRequests)["urls"] === ["https://example.com", "https://preview.stage.example"]);
+    assert(Capsule::$services[123]["matomo_last_error"] === "");
+    assert(str_contains(moddhosting_matomo_field($params), "Status: OK"));
     assert(Capsule::$services[123]["matomo_attempt"] === null);
     assert(json_decode(end($controllerRequests)[CURLOPT_POSTFIELDS], true)["matomo_id"] === 71);
+    assert(count(array_filter($controllerRequests, static fn(array $request): bool => str_ends_with($request[CURLOPT_URL], "/v1/info"))) === 1);
     assert(moddhosting_deploy($params) === "success");
     assert(moddhosting_ChangePackage($params) === "success");
-    assert(count($matomoRequests) === 1);
+    assert(count(array_filter($matomoRequests, static fn(array $request): bool => $request["method"] === "SitesManager.addSite")) === 1);
+    $beforeUnsuspend = count($matomoRequests);
     assert(moddhosting_UnsuspendAccount($params) === "success");
+    assert(count($matomoRequests) === $beforeUnsuspend);
     assert(json_decode(end($controllerRequests)[CURLOPT_POSTFIELDS], true)["matomo_id"] === 71);
     assert(moddhosting_TerminateAccount($params) === "success");
     assert(Capsule::$services[123]["matomo_id"] === 71);
+
+    // Deploy replaces the full URL list and name while retaining the assigned ID and remote group.
+    assert(end($matomoRequests)["method"] === "SitesManager.updateSite");
+    assert(end($matomoRequests)["urls"] === ["https://example.com", "https://preview.stage.example"]);
+    Capsule::$services[123]["staging_label"] = "";
+    assert(moddhosting_deploy(array_replace($params, ["domain" => "NEW.Example."])) === "success");
+    $sync = $matomoRequests[count($matomoRequests) - 2];
+    assert($sync["method"] === "SitesManager.updateSite");
+    assert($sync["siteName"] === "new.example #123");
+    assert($sync["urls"] === ["https://new.example"]);
+    assert(!isset($sync["group"]) && !isset($sync["excludeUnknownUrls"]));
+    assert(end($matomoRequests)["method"] === "SitesManager.setSiteAliasUrls");
+    assert(!isset(end($matomoRequests)["urls"]));
+    assert(Capsule::$services[123]["matomo_id"] === 71);
+
+    assert(moddhosting_matomo_id($params, true, "example.com") === 71);
+    assert(end($matomoRequests)["method"] === "SitesManager.setSiteAliasUrls");
+
+    // Sync errors retain the ID, expose escaped status, redact secrets and never block hosting.
+    $updateResponses = [[200, new \RuntimeException("secret-token <unsafe> " . str_repeat("é", 1100))]];
+    assert(moddhosting_deploy($params) === "success");
+    assert(json_decode(end($controllerRequests)[CURLOPT_POSTFIELDS], true)["matomo_id"] === 71);
+    $lastError = Capsule::$services[123]["matomo_last_error"];
+    assert(!str_contains($lastError, "secret-token"));
+    assert(str_contains($lastError, "[REDACTED]"));
+    assert(preg_match_all("/./us", $lastError) === 1024);
+    assert(str_contains(moddhosting_matomo_field($params), "Error: [REDACTED] &lt;unsafe&gt;"));
+    assert(str_contains(moddhosting_matomo_field($params), "data-moddhosting-status=\"matomo\""));
+    $_POST = ["moddhosting_matomo_id" => "71"];
+    moddhosting_AdminServicesTabFieldsSave($params);
+    $_POST = [];
+    assert(Capsule::$services[123]["matomo_last_error"] === $lastError);
+    Capsule::$settings["matomoUrl"] = "";
+    assert(moddhosting_matomo_id($params, true) === 71);
+    assert(Capsule::$services[123]["matomo_last_error"] !== "");
+    Capsule::$settings["matomoUrl"] = "https://stats.example";
+    $updateResponses = [[200, "{\"result\":\"success\"}"], [200, "{}"]];
+    assert(moddhosting_matomo_id($params, true) === 71);
+    assert(str_contains(Capsule::$services[123]["matomo_last_error"], "alias reset"));
+    Capsule::$failStatusWrite = true;
+    assert(moddhosting_matomo_id($params, true) === 71);
+    Capsule::$failStatusWrite = false;
+    assert(moddhosting_matomo_id($params, true) === 71);
+    assert(Capsule::$services[123]["matomo_last_error"] === "");
 
     // Offline controller leaves the local field visible and writable.
     $offline = $params;
@@ -169,6 +239,8 @@ namespace {
     $_POST = ["moddhosting_matomo_id" => "82"];
     moddhosting_AdminServicesTabFieldsSave($offline);
     assert(Capsule::$services[123]["matomo_id"] === 82);
+    assert(Capsule::$services[123]["matomo_last_error"] === null);
+    assert(str_contains(moddhosting_matomo_field($params), "Status: Not Configured"));
     $_POST = [];
 
     // A form loaded online must still save Matomo edits if the controller drops before Save.
@@ -225,7 +297,7 @@ namespace {
     $responses = [[200, json_encode([["name" => "prefix " . $marker, "idsite" => "95"], ["name" => $marker, "idsite" => "91"]])]];
     assert(moddhosting_matomo_id($params, true) === 91);
     assert(Capsule::$services[123]["matomo_attempt"] === null);
-    assert(count($matomoRequests) === $requestsBefore + 3);
+    assert(count($matomoRequests) === $requestsBefore + 5);
 
     // A JSON error may follow remote creation; reconcile instead of retrying addSite.
     moddhosting_updateConfig($params + ["matomo_id" => ""]);
@@ -287,4 +359,22 @@ namespace {
     $failLog = false;
     assert(!Capsule::$locked);
     assert($responses === []);
+
+    // New pending requests recover by exact group; legacy name recovery above remains supported.
+    Capsule::$services[123]["matomo_attempt"] = "WHMCS 123 group-marker";
+    $responses = [[200, json_encode([["name" => "example.com #123", "group" => "WHMCS 123 group-marker", "idsite" => "201"]])]];
+    $updateResponses = [[200, "{\"result\":\"error\"}"]];
+    assert(moddhosting_matomo_id($params, true, "preview.stage.example") === 201);
+    assert(Capsule::$services[123]["matomo_id"] === 201);
+    assert(Capsule::$services[123]["matomo_attempt"] === null);
+    assert(Capsule::$services[123]["matomo_last_error"] !== "");
+    assert(end($matomoRequests)["urls"] === ["https://example.com", "https://preview.stage.example"]);
+    assert(moddhosting_matomo_id($params, true, "preview.stage.example") === 201);
+    assert(Capsule::$services[123]["matomo_last_error"] === "");
+    // New rows still record configuration failures without a preexisting service record.
+    Capsule::$services = [];
+    Capsule::$settings["matomoUrl"] = "";
+    assert(moddhosting_matomo_id($params, true) === 0);
+    assert(Capsule::$services[123]["matomo_last_error"] !== "");
+    assert(!isset(Capsule::$services[123]["matomo_attempt"]));
 }

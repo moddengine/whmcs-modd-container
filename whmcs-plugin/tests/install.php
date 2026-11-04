@@ -56,10 +56,11 @@ namespace {
     moddhosting_install();
     assert(Builder::$columns["matomo_id"] === ["type" => "unsignedInteger", "nullable" => true]);
     assert(Builder::$columns["matomo_attempt"]["nullable"]);
+    assert(Builder::$columns["matomo_last_error"]["nullable"]);
     $schema = Builder::$columns;
     moddhosting_install();
     assert(Builder::$columns === $schema);
-    Builder::$columns = array_diff_key($schema, array_flip(["matomo_id", "matomo_attempt"]));
+    Builder::$columns = array_diff_key($schema, array_flip(["matomo_id", "matomo_attempt", "matomo_last_error"]));
     Capsule::$services = [123 => ["image_version" => "v1", "staging_label" => ""]];
     moddhosting_install();
     assert(Builder::$columns === $schema);

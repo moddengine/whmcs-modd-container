@@ -36,10 +36,11 @@ function moddhosting_ConfigOptions(): array
 function moddhosting_CreateAccount(array $params): string
 {
     try {
+        $stagingDomain = moddhosting_selected_staging($params);
         return moddhosting_call($params, 'PUT', '/v1/services/' . moddhosting_service_id($params), [
             'main_domain' => (string) $params['domain'],
-            'matomo_id' => moddhosting_matomo_id($params, true),
-			'staging_domain' => moddhosting_selected_staging($params),
+            'matomo_id' => moddhosting_matomo_id($params, true, $stagingDomain),
+			'staging_domain' => $stagingDomain,
 			'public_ipv4' => trim((string) $params['serverip']),
             'version' => moddhosting_selected_version($params),
             'display_name' => 'WHMCS service ' . (int) $params['serviceid'],
@@ -243,14 +244,21 @@ function moddhosting_save_service_config(array $params, array $config, ?array $v
     if (array_key_exists('matomo_id', $config)) {
         $values['matomo_id'] = moddhosting_parse_matomo_id($config['matomo_id']);
         $values['matomo_attempt'] = null;
+        $values['matomo_last_error'] = null;
     }
     if ($values === []) {
         throw new \InvalidArgumentException('Provide image_version, staging_hostname or matomo_id.');
     }
     $save = static function () use ($params, $values, $preservePending): void {
-        if ($preservePending && array_key_exists('matomo_id', $values) && $values['matomo_id'] === null
-            && Capsule::table('mod_moddhosting_services')->where('service_id', (int) $params['serviceid'])->value('matomo_id') === null) {
-            unset($values['matomo_attempt']);
+        if (array_key_exists('matomo_id', $values)) {
+            $savedId = moddhosting_parse_matomo_id(Capsule::table('mod_moddhosting_services')
+                ->where('service_id', (int) $params['serviceid'])->value('matomo_id'));
+            if ($savedId === $values['matomo_id'] && ($preservePending || $savedId !== null)) {
+                unset($values['matomo_last_error']);
+                if ($preservePending) {
+                    unset($values['matomo_attempt']);
+                }
+            }
         }
         Capsule::table('mod_moddhosting_services')->updateOrInsert(
             ['service_id' => (int) $params['serviceid']],

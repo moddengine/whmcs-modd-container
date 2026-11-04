@@ -94,6 +94,12 @@ function moddhosting_install(): void
         });
     }
 
+    if (!$schema->hasColumn('mod_moddhosting_services', 'matomo_last_error')) {
+        $schema->table('mod_moddhosting_services', static function (Blueprint $table): void {
+            $table->string('matomo_last_error', 1024)->nullable();
+        });
+    }
+
     $fields = Capsule::table('tblcustomfields')
         ->join('tblproducts', 'tblproducts.id', '=', 'tblcustomfields.relid')
         ->where('tblcustomfields.type', 'product')
