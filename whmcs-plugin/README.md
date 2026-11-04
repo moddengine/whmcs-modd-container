@@ -68,7 +68,7 @@ The service admin page has an editable **Matomo ID**, stored as nullable
 `mod_moddhosting_services.matomo_id`. Use a positive integer up to 4294967295;
 blank clears the mapping and its `matomo_attempt` creation key. Saving changes
 WHMCS only. The next WHMCS **Deploy** or **Unsuspend** passes the ID to the
-controller and container as `ME_CONF__matomo__id`. Addon deployments and bulk
+controller and container as `ME_CONF___matomo___id`. Addon deployments and bulk
 upgrades reuse the controller's cached ID; they do not reread WHMCS mappings.
 
 Configure the addon's shared **Matomo URL** and **Matomo API Token** (`matomoUrl`

@@ -208,18 +208,22 @@ func TestContainerSpecMatomo(t *testing.T) {
 		for _, id := range []uint32{0, 123, 4294967295} {
 			service := model.Service{ID: "whmcs-123", Version: "v1", MatomoID: id,
 				Deploy: map[string]model.Deploy{slot: {Socket: "/run/test.sock"}}}
-			cfg := config.Docker{Environment: []string{"ME_CONF__matomo__id=999", "ME_CONF__matomo__id", "OTHER=keep", "ME_CONF__matomo__id=888"}}
+			cfg := config.Docker{Environment: []string{"ME_CONF___matomo___id=999", "ME_CONF___matomo___id", "OTHER=keep", "ME_CONF___matomo___id=888", "ME_CONF__matomo__id=777", "ME_CONF__matomo__id"}}
 			spec, _, _, err := ContainerSpec(cfg, service, slot)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var values []string
 			for _, value := range spec.Env {
-				if name, _, _ := strings.Cut(value, "="); name == "ME_CONF__matomo__id" {
+				name, _, _ := strings.Cut(value, "=")
+				if name == "ME_CONF__matomo__id" {
+					t.Fatalf("legacy Matomo variable in environment: %v", spec.Env)
+				}
+				if name == "ME_CONF___matomo___id" {
 					values = append(values, value)
 				}
 			}
-			if id == 0 && len(values) != 0 || id > 0 && (len(values) != 1 || values[0] != fmt.Sprintf("ME_CONF__matomo__id=%d", id)) || !slices.Contains(spec.Env, "OTHER=keep") {
+			if id == 0 && len(values) != 0 || id > 0 && (len(values) != 1 || values[0] != fmt.Sprintf("ME_CONF___matomo___id=%d", id)) || !slices.Contains(spec.Env, "OTHER=keep") {
 				t.Fatalf("slot=%s id=%d environment=%v", slot, id, spec.Env)
 			}
 		}

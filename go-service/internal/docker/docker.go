@@ -119,12 +119,12 @@ func ContainerSpec(cfg config.Docker, service model.Service, slot string) (*cont
 	env := make([]string, 0, len(cfg.Environment)+2)
 	for _, value := range cfg.Environment {
 		value = replacer.Replace(value)
-		if name, _, _ := strings.Cut(value, "="); name != "ME_CONF__matomo__id" {
+		if name, _, _ := strings.Cut(value, "="); name != "ME_CONF___matomo___id" && name != "ME_CONF__matomo__id" {
 			env = append(env, value)
 		}
 	}
 	if service.MatomoID > 0 {
-		env = append(env, "ME_CONF__matomo__id="+strconv.FormatUint(uint64(service.MatomoID), 10))
+		env = append(env, "ME_CONF___matomo___id="+strconv.FormatUint(uint64(service.MatomoID), 10))
 	}
 	env = append(env, "ME_SITE="+service.ID, "ME_INSTANCE="+service.ID+"-"+slot)
 	packageCodes := make([]string, 0, len(service.Package))

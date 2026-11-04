@@ -492,7 +492,7 @@ A changed ID on Deploy recreates the target container even when the image and
 domains are unchanged. Deploy while suspended caches the ID for the next Resume.
 
 Every newly created blue or green container gets exactly
-`ME_CONF__matomo__id=<positive decimal>` when assigned, and no such variable when
+`ME_CONF___matomo___id=<positive decimal>` when assigned, and no such variable when
 unassigned. Configured environment entries with that name are removed so they
 cannot override the service value or survive a clear. WHMCS import/admin edits
 reach the controller on the next Deploy or Unsuspend; ordinary upgrades reuse the
