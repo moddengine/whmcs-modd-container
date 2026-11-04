@@ -54,9 +54,85 @@ time; use **Reconnect DNS** there to queue the current domain and IP again.
 While a lifecycle action or DNS sync is running, the product/service page
 refreshes every three seconds and stops when the controller work finishes.
 
-Static analysis:
+Tests and static analysis:
 
 ```sh
 composer install
+composer test
 composer analyse
 ```
+
+## Matomo site IDs
+
+The service admin page has an editable **Matomo ID**, stored as nullable
+`mod_moddhosting_services.matomo_id`. Use a positive integer up to 4294967295;
+blank clears the mapping and its `matomo_attempt` creation key. Saving changes
+WHMCS only. The next WHMCS **Deploy** or **Unsuspend** passes the ID to the
+controller and container as `ME_CONF__matomo__id`. Addon deployments and bulk
+upgrades reuse the controller's cached ID; they do not reread WHMCS mappings.
+
+Configure the addon's shared **Matomo URL** and **Matomo API Token** (`matomoUrl`
+and `matomoToken`) to enable automatic site creation on WHMCS **Create** or
+**Deploy** when the ID is blank. Use a token belonging to a Matomo superuser
+(a POST-only token is recommended). The token stays in WHMCS; it is not sent
+to controllers or containers. Provisioning continues if Matomo fails; inspect
+the WHMCS module log for errors. Clearing an ID allows the next Deploy to
+create another remote site; it does not delete the previous Matomo site.
+An uncertain creation result leaves a pending attempt to prevent duplicates.
+Check Matomo for the site and enter its ID before retrying. An ordinary Save
+of an unchanged blank ID preserves that marker; use the explicit reset checkbox
+only after resolving the previous attempt. An explicit API blank also resets it.
+
+## Import existing Matomo mappings
+
+Deploy the controller first, then these WHMCS modules and their schema upgrade.
+Before enabling automatic creation, back up the WHMCS database and import all
+existing mappings, including suspended and terminated services. Keep automatic
+creation unconfigured and pause lifecycle jobs and service admin edits during
+the import. These SQL helpers require InnoDB tables and `CREATE ROUTINE`
+permission; run them in a dedicated connection with the WHMCS database selected,
+outside any existing transaction. They create a short-lived procedure, not an
+import UI or permanent background job.
+
+From the repository root, open the MySQL/MariaDB client and run:
+
+```sql
+SOURCE whmcs-plugin/sql/matomo-stage.sql;
+INSERT INTO moddhosting_matomo_input (service_id, matomo_id) VALUES
+    ('123', '45'), ('124', '46'); -- replace with your complete mapping
+-- The staging file also contains an optional CSV LOAD DATA example.
+SOURCE whmcs-plugin/sql/matomo-import.sql;
+CALL moddhosting_import_matomo(0); -- preview and validate, no writes
+CALL moddhosting_import_matomo(1); -- only after reviewing the preview
+DROP PROCEDURE moddhosting_import_matomo;
+```
+
+Use WHMCS service IDs, not client IDs. Input IDs must be positive decimal
+integers within the unsigned 32-bit range, without leading zeros. Surrounding
+spaces are trimmed. CSV files must have no header; use LF line endings.
+Preview labels each row `insert`, `fill blank`, `already matches`, `conflict`,
+or a validation error, and lists Matomo IDs shared by multiple services for
+review. Shared Matomo IDs are permitted. Invalid or duplicate service IDs,
+unknown services, products using another module, and conflicting assigned IDs
+abort the entire apply with a SQL error and transaction rollback. There is no
+service-status filter. Only missing rows and NULL IDs are filled; identical
+mappings are no-ops. Image version, staging label and other existing fields are
+preserved. Fix rejected input and preview again; do not replace conflicts
+automatically. Drop the helper even after a rejected call, and disconnect to
+discard the temporary staging tables. Never continue an errored SQL batch with
+`--force`.
+
+After import, configure automatic creation and perform controlled WHMCS Deploys
+for active services to propagate IDs. Leave suspended services stopped; their
+IDs reach the controller on their next intended Unsuspend. A Deploy can restore
+a terminated service, so deploy those only when restoration is intended.
+
+For an API-based import, the existing WHMCS `ModuleCustom` action with
+`func_name=updateConfig` accepts `matomo_id` alone (a positive integer, or blank
+to clear it). Use your existing authenticated WHMCS API integration and check
+every result. This path updates one service at a time and has no batch conflict
+guard; use the SQL template when you need all-or-nothing import behavior.
+
+The disposable SQL self-check can be run against an empty test database from
+the repository root with `SOURCE whmcs-plugin/sql/tests/matomo-smoke.sql;`.
+It creates fixture tables and must never run in a WHMCS database.

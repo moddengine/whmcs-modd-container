@@ -12,6 +12,8 @@ if (!defined('WHMCS')) {
 
 require_once __DIR__ . '/lib/ApiException.php';
 require_once __DIR__ . '/lib/ApiClient.php';
+require_once __DIR__ . '/lib/MatomoClient.php';
+require_once __DIR__ . '/lib/matomo.php';
 
 /** @return array<string, mixed> */
 function moddhosting_MetaData(): array
@@ -36,6 +38,7 @@ function moddhosting_CreateAccount(array $params): string
     try {
         return moddhosting_call($params, 'PUT', '/v1/services/' . moddhosting_service_id($params), [
             'main_domain' => (string) $params['domain'],
+            'matomo_id' => moddhosting_matomo_id($params, true),
 			'staging_domain' => moddhosting_selected_staging($params),
 			'public_ipv4' => trim((string) $params['serverip']),
             'version' => moddhosting_selected_version($params),
@@ -86,6 +89,7 @@ function moddhosting_UnsuspendAccount(array $params): string
     try {
         return moddhosting_call($params, 'POST', '/v1/services/' . moddhosting_service_id($params) . '/resume', [
             'package' => moddhosting_package($params),
+            'matomo_id' => moddhosting_matomo_id($params, false),
         ]);
     } catch (\Throwable $error) {
         return $error->getMessage();
@@ -118,6 +122,7 @@ function moddhosting_TestConnection(array $params): array
  */
 function moddhosting_AdminServicesTabFields(array $params): array
 {
+    $matomo = ['Matomo Site ID' => moddhosting_matomo_field($params)];
     try {
         $client = moddhosting_client($params);
         $versions = moddhosting_versions($params);
@@ -147,7 +152,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
         $defaultStaging = moddhosting_default_staging_label((string) ($params['domain'] ?? ''));
         $field = static fn(string $name, string $value): string => '<span data-moddhosting-status="' . $name . '">' . $value . '</span>';
         $autoRefresh = moddhosting_action_running($status) ? moddhosting_status_refresh_script() : '';
-        return [
+        return $matomo + [
             'Image Version' => '<input type="hidden" name="moddhosting_fields" value="1"><select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
             'Staging Hostname' => '<div class="input-group" style="max-width:500px"><input type="text" name="modulefields[1]" class="form-control" maxlength="32" value="'
                 . moddhosting_escape($stagingLabel) . '" placeholder="Blank to disable staging"><span class="input-group-addon">.'
@@ -164,7 +169,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
             'Controller Error' => $field('error', moddhosting_escape((string) ($status['last_error'] ?? ''))),
         ];
     } catch (\Throwable $error) {
-        return ['Controller Error' => moddhosting_escape($error->getMessage())];
+        return $matomo + ['Controller Error' => moddhosting_escape($error->getMessage())];
     }
 }
 
@@ -174,14 +179,20 @@ function moddhosting_AdminServicesTabFields(array $params): array
  */
 function moddhosting_AdminServicesTabFieldsSave(array $params, ?array $versions = null): void
 {
-    if (($_POST['moddhosting_fields'] ?? '') !== '1') {
-        return;
+    $config = [];
+    if (array_key_exists('moddhosting_matomo_id', $_POST)) {
+        $config['matomo_id'] = $_POST['moddhosting_matomo_id'];
     }
-    $fields = $_POST['modulefields'] ?? [];
-    moddhosting_save_service_config($params, [
-        'image_version' => is_array($fields) ? ($fields[0] ?? '') : '',
-        'staging_hostname' => is_array($fields) ? ($fields[1] ?? '') : '',
-    ], $versions);
+    if (($_POST['moddhosting_fields'] ?? '') === '1') {
+        $fields = $_POST['modulefields'] ?? [];
+        $config += [
+            'image_version' => is_array($fields) ? ($fields[0] ?? '') : '',
+            'staging_hostname' => is_array($fields) ? ($fields[1] ?? '') : '',
+        ];
+    }
+    if ($config !== []) {
+        moddhosting_save_service_config($params, $config, $versions, empty($_POST['moddhosting_matomo_reset']));
+    }
 }
 
 /**
@@ -191,7 +202,7 @@ function moddhosting_AdminServicesTabFieldsSave(array $params, ?array $versions 
 function moddhosting_updateConfig(array $params, ?array $versions = null): string
 {
     try {
-        $config = array_intersect_key(array_merge($params, $_POST), array_flip(['image_version', 'staging_hostname']));
+        $config = array_intersect_key(array_merge($params, $_POST), array_flip(['image_version', 'staging_hostname', 'matomo_id']));
         moddhosting_save_service_config($params, $config, $versions);
         return 'success';
     } catch (\Throwable $error) {
@@ -204,7 +215,7 @@ function moddhosting_updateConfig(array $params, ?array $versions = null): strin
  * @param array<string, mixed> $config
  * @param list<array<string, mixed>>|null $versions
  */
-function moddhosting_save_service_config(array $params, array $config, ?array $versions = null): void
+function moddhosting_save_service_config(array $params, array $config, ?array $versions = null, bool $preservePending = false): void
 {
     $values = [];
     if (array_key_exists('image_version', $config)) {
@@ -212,7 +223,9 @@ function moddhosting_save_service_config(array $params, array $config, ?array $v
             throw new \InvalidArgumentException('Image version must be a string.');
         }
         $version = trim($config['image_version']);
-        if (!in_array($version, array_column($versions ?? moddhosting_versions($params), 'version'), true)) {
+        if (($versions !== null || $version === '' || $version !== Capsule::table('mod_moddhosting_services')
+                ->where('service_id', (int) $params['serviceid'])->value('image_version'))
+            && !in_array($version, array_column($versions ?? moddhosting_versions($params), 'version'), true)) {
             throw new \InvalidArgumentException('Select an image version available from the controller.');
         }
         $values['image_version'] = $version;
@@ -227,13 +240,28 @@ function moddhosting_save_service_config(array $params, array $config, ?array $v
         }
         $values['staging_label'] = $staging;
     }
-    if ($values === []) {
-        throw new \InvalidArgumentException('Provide image_version or staging_hostname.');
+    if (array_key_exists('matomo_id', $config)) {
+        $values['matomo_id'] = moddhosting_parse_matomo_id($config['matomo_id']);
+        $values['matomo_attempt'] = null;
     }
-    Capsule::table('mod_moddhosting_services')->updateOrInsert(
-        ['service_id' => (int) $params['serviceid']],
-        $values,
-    );
+    if ($values === []) {
+        throw new \InvalidArgumentException('Provide image_version, staging_hostname or matomo_id.');
+    }
+    $save = static function () use ($params, $values, $preservePending): void {
+        if ($preservePending && array_key_exists('matomo_id', $values) && $values['matomo_id'] === null
+            && Capsule::table('mod_moddhosting_services')->where('service_id', (int) $params['serviceid'])->value('matomo_id') === null) {
+            unset($values['matomo_attempt']);
+        }
+        Capsule::table('mod_moddhosting_services')->updateOrInsert(
+            ['service_id' => (int) $params['serviceid']],
+            $values,
+        );
+    };
+    if (array_key_exists('matomo_id', $values)) {
+        moddhosting_matomo_lock((int) $params['serviceid'], $save);
+    } else {
+        $save();
+    }
 }
 
 /**

@@ -277,7 +277,7 @@ func TestRecoverInterruptedMarksDeferredWorkFailed(t *testing.T) {
 	if err := repo.Init(); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.Put(model.Service{ID: "whmcs-1", State: model.Active, Phase: "routing", Operation: "upgrade"}); err != nil {
+	if err := repo.Put(model.Service{ID: "whmcs-1", MatomoID: 42, State: model.Active, Phase: "routing", Operation: "upgrade"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.PutTombstone(model.Tombstone{ID: "whmcs-2", State: model.Deleted, Phase: "deleting", Operation: "delete"}); err != nil {
@@ -289,7 +289,7 @@ func TestRecoverInterruptedMarksDeferredWorkFailed(t *testing.T) {
 	}
 	service, _ := repo.Get("whmcs-1")
 	tombstone, _ := repo.GetTombstone("whmcs-2")
-	if service.Phase != "failed" || tombstone.Phase != "failed" {
+	if service.Phase != "failed" || service.MatomoID != 42 || tombstone.Phase != "failed" {
 		t.Fatalf("service=%q tombstone=%q", service.Phase, tombstone.Phase)
 	}
 }
@@ -1087,6 +1087,11 @@ func TestResumeHealthSwitchesToOppositeSlot(t *testing.T) {
 	if err := repo.Put(service); err != nil {
 		t.Fatal(err)
 	}
+	latest := service
+	latest.MatomoID = 42
+	if err := repo.Put(latest); err != nil {
+		t.Fatal(err)
+	}
 	manager := Manager{
 		Repo: repo, Health: healthcheck.Checker{Path: "/health", Attempts: 1}, Notify: notify.Disabled{}, healthAttempts: map[string]uint64{service.ID: 1},
 		Caddy: caddy.Adapter{Dir: filepath.Join(root, "caddy"), ActiveTemplate: "{hostnames} {\n reverse_proxy unix/" + socket + "\n}\n", ValidateCommand: []string{"true"}, ReloadCommand: []string{"true"}},
@@ -1096,7 +1101,7 @@ func TestResumeHealthSwitchesToOppositeSlot(t *testing.T) {
 		t.Fatal("completed health attempt remained in memory")
 	}
 	got, err := repo.Get(service.ID)
-	if err != nil || got.State != model.Active || got.Phase != "running" || got.LiveDeploy != "green" || got.Package["plan"] != "new" || got.TargetPackage != nil {
+	if err != nil || got.State != model.Active || got.Phase != "running" || got.LiveDeploy != "green" || got.MatomoID != 42 || got.Package["plan"] != "new" || got.TargetPackage != nil {
 		t.Fatalf("resumed service = %#v, %v", got, err)
 	}
 }
@@ -1209,7 +1214,7 @@ func TestReplacementActivationRequiresHealthBeforeGoingLive(t *testing.T) {
 				if err := repo.Init(); err != nil {
 					t.Fatal(err)
 				}
-				service := model.Service{ID: "whmcs-123", State: pending.state, Phase: "waiting_for_health", Operation: pending.operation,
+				service := model.Service{ID: "whmcs-123", MatomoID: 42, State: pending.state, Phase: "waiting_for_health", Operation: pending.operation,
 					Version: "v1", TargetVersion: "v3", LiveDeploy: "blue", TargetDeploy: "green", MainDomain: "old.example.com",
 					TargetMainDomain: "fixed.example.com", TargetStagingDomain: "fixed.staging.test", TargetPublicIPv4: "203.0.113.11",
 					TargetPackage: map[string]string{"plan": "fixed"}, Deploy: map[string]model.Deploy{"green": {Socket: socket, Version: "v3", Health: "checking"}},
@@ -1355,7 +1360,7 @@ func TestStopAbandonsDeploymentWaitingForHealth(t *testing.T) {
 				if err := os.WriteFile(data, []byte("keep"), 0600); err != nil {
 					t.Fatal(err)
 				}
-				service := model.Service{ID: "whmcs-123", State: pending.state, Phase: "waiting_for_health", Operation: pending.operation,
+				service := model.Service{ID: "whmcs-123", MatomoID: 42, State: pending.state, Phase: "waiting_for_health", Operation: pending.operation,
 					MainDomain: "example.com", Version: "v1", TargetVersion: "v2", LiveDeploy: "blue", TargetDeploy: "green",
 					Dataset: model.DatasetRecord{Mountpoint: mountpoint}, Deploy: map[string]model.Deploy{"green": {Health: "checking"}},
 					TargetPackage: map[string]string{"plan": "pending"}, TargetPublicIPv4: "203.0.113.12",
@@ -1391,7 +1396,7 @@ func TestStopAbandonsDeploymentWaitingForHealth(t *testing.T) {
 				// A late failed health result must not revive or fail the stopped service.
 				manager.finishHealth(service, pending.operation, "stale", 1)
 				got, err := repo.Get(service.ID)
-				if err != nil || got.State != target || got.Phase != "stopped" || got.Operation != "" || got.TargetPackage != nil || got.TargetPublicIPv4 != "" {
+				if err != nil || got.State != target || got.Phase != "stopped" || got.Operation != "" || got.MatomoID != 42 || got.TargetPackage != nil || got.TargetPublicIPv4 != "" {
 					t.Fatalf("stopped service: %#v, %v", got, err)
 				}
 				if target == model.Suspended && stops.Load() != 1 || target == model.Terminated && removes.Load() != 1 {

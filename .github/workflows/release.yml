@@ -26,6 +26,12 @@ jobs:
       - name: Install WHMCS plugin development dependencies
         run: composer install --working-dir=whmcs-plugin --no-interaction --no-progress --prefer-dist
 
+      - name: Check WHMCS plugin
+        working-directory: whmcs-plugin
+        run: |
+          composer test
+          composer analyse -- --memory-limit=512M
+
       - name: Build controller
         working-directory: go-service
         env:

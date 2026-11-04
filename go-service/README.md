@@ -62,3 +62,7 @@ The socket sends a full `status` snapshot immediately, then only when the
 repository, Docker, or Caddy view changes. It polls once per second, has no
 history, and closes normally after sending the final `deleted` snapshot. See
 `openapi.yaml` for the handshake and snapshot schemas.
+
+WHMCS can supply optional `matomo_id` on Provision/Deploy and Resume. The controller
+persists and reuses it for container environment delivery; omission preserves it
+and 0 clears it. See [container runtime](docs/container-runtime.md#matomo-site-id).

@@ -66,6 +66,9 @@ namespace WHMCS\Database {
 
     final class Connection
     {
+        /** @param list<mixed> $bindings */
+        public function selectOne(string $query, array $bindings = []): ?\stdClass {}
+
         /** @template T @param callable(): T $callback @return T */
         public function transaction(callable $callback): mixed {}
     }
@@ -94,6 +97,8 @@ namespace Illuminate\Database\Schema {
 
     final class ColumnDefinition
     {
+        public function nullable(): self {}
+
         public function primary(): self {}
 
         public function default(mixed $value): self {}

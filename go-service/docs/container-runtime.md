@@ -480,3 +480,20 @@ lifecycle transition, `422` a host lifecycle step failed, `503` Docker could
 not be queried while validating an image, and `500` an internal persistence or
 controller error. For `500`, the public message is generic; use its request ID
 to find the underlying logged error.
+
+### Matomo site ID
+
+WHMCS owns the Matomo site mapping; the controller never creates remote sites.
+Provision/Deploy and Resume accept optional `matomo_id` integers from 0 through
+4294967295. Omission preserves the cached ID, including for old callers and TOML
+records; explicit 0 clears it. The ID is persisted in service TOML/JSON and survives
+suspension, termination, retries, controller restarts, and upgrades (including bulk).
+A changed ID on Deploy recreates the target container even when the image and
+domains are unchanged. Deploy while suspended caches the ID for the next Resume.
+
+Every newly created blue or green container gets exactly
+`ME_CONF__matomo__id=<positive decimal>` when assigned, and no such variable when
+unassigned. Configured environment entries with that name are removed so they
+cannot override the service value or survive a clear. WHMCS import/admin edits
+reach the controller on the next Deploy or Unsuspend; ordinary upgrades reuse the
+cached ID. Purging controller state does not change the WHMCS mapping.

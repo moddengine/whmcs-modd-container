@@ -11,6 +11,13 @@
         "phpstan/phpstan": "^2.1"
     },
     "scripts": {
+        "test": [
+            "@php -d zend.assertions=1 -d assert.exception=1 tests/api_client.php",
+            "@php -d zend.assertions=1 -d assert.exception=1 tests/service_module.php",
+            "@php -d zend.assertions=1 -d assert.exception=1 tests/addon.php",
+            "@php -d zend.assertions=1 -d assert.exception=1 tests/install.php",
+            "@php -d zend.assertions=1 -d assert.exception=1 tests/matomo.php"
+        ],
         "analyse": "phpstan analyse --no-progress --debug"
     },
     "config": {

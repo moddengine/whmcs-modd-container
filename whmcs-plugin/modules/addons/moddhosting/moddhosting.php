@@ -23,6 +23,18 @@ function moddhosting_config(): array
         'author' => 'MODD Pty Ltd',
         'language' => 'english',
         'fields' => [
+            'matomoUrl' => [
+                'FriendlyName' => 'Matomo URL',
+                'Type' => 'text',
+                'Size' => '64',
+                'Description' => 'Shared HTTPS Matomo installation URL.',
+            ],
+            'matomoToken' => [
+                'FriendlyName' => 'Matomo API Token',
+                'Type' => 'password',
+                'Size' => '64',
+                'Description' => 'Shared superuser API token, required by Matomo to create sites.',
+            ],
             'webhookToken' => [
                 'FriendlyName' => 'Docker Hub Webhook Token',
                 'Type' => 'password',
@@ -68,6 +80,17 @@ function moddhosting_install(): void
     } elseif (!$schema->hasColumn('mod_moddhosting_services', 'image_version')) {
         $schema->table('mod_moddhosting_services', static function (Blueprint $table): void {
             $table->string('image_version', 128)->default('');
+        });
+    }
+
+    if (!$schema->hasColumn('mod_moddhosting_services', 'matomo_id')) {
+        $schema->table('mod_moddhosting_services', static function (Blueprint $table): void {
+            $table->unsignedInteger('matomo_id')->nullable();
+        });
+    }
+    if (!$schema->hasColumn('mod_moddhosting_services', 'matomo_attempt')) {
+        $schema->table('mod_moddhosting_services', static function (Blueprint $table): void {
+            $table->string('matomo_attempt', 64)->nullable();
         });
     }
 

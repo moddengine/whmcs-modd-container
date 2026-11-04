@@ -322,6 +322,11 @@ components:
         public_ipv4: { type: string, format: ipv4 }
         version: { type: string, minLength: 1 }
         display_name: { type: string }
+        matomo_id:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: WHMCS Matomo site ID. Omit to preserve the cached ID; 0 clears it. Changes recreate the container.
         package:
           type: object
           maxProperties: 20
@@ -332,6 +337,11 @@ components:
       type: object
       additionalProperties: false
       properties:
+        matomo_id:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Current WHMCS Matomo site ID. Omit to preserve the cached ID; 0 clears it.
         package:
           type: object
           maxProperties: 20
@@ -393,6 +403,7 @@ components:
     ServiceStatus:
       type: object
       properties:
+        matomo_id: { type: integer, minimum: 0, maximum: 4294967295, description: Cached WHMCS Matomo site ID; 0 means unassigned. }
         id: { type: string }
         state: { type: string, enum: [active, suspended, terminated, deleted] }
         main_domain: { type: string }

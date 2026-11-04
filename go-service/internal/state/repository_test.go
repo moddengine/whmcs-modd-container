@@ -16,7 +16,7 @@ func TestRepositoryRoundTripAndBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := model.Service{
-		ID: "whmcs-123", State: model.Active, MainDomain: "example.com",
+		ID: "whmcs-123", MatomoID: 4294967295, State: model.Active, MainDomain: "example.com",
 		StagingDomain: "example-com.staging.com", PublicIPv4: "203.0.113.10", DNSStatus: "in_sync", DNSSyncedAt: "2026-08-12T00:00:00Z", Version: "v1", LiveDeploy: "blue",
 		Package: map[string]string{"plan": "small|Small Hosting Plan"}, TargetPackage: map[string]string{"plan": "large|Large Hosting Plan"},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -30,7 +30,7 @@ func TestRepositoryRoundTripAndBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := repo.Get(service.ID)
-	if err != nil || got.Version != "v2" || got.PublicIPv4 != service.PublicIPv4 || got.DNSStatus != "in_sync" || got.DNSSyncedAt == "" || got.Package["plan"] != service.Package["plan"] || got.TargetPackage["plan"] != service.TargetPackage["plan"] {
+	if err != nil || got.Version != "v2" || got.MatomoID != service.MatomoID || got.PublicIPv4 != service.PublicIPv4 || got.DNSStatus != "in_sync" || got.DNSSyncedAt == "" || got.Package["plan"] != service.Package["plan"] || got.TargetPackage["plan"] != service.TargetPackage["plan"] {
 		t.Fatalf("Get() = %#v, %v", got, err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "services", "whmcs-123.toml.bak")); err != nil {
@@ -58,5 +58,17 @@ func TestBulkUpgradeRoundTrip(t *testing.T) {
 	services, err := repo.List()
 	if err != nil || len(services) != 0 {
 		t.Fatalf("bulk upgrade was treated as a service: %#v, %v", services, err)
+	}
+}
+
+func TestLegacyServiceWithoutMatomoID(t *testing.T) {
+	root := t.TempDir()
+	repo := New(root, filepath.Join(root, "tombstones"))
+	if err := os.WriteFile(filepath.Join(root, "whmcs-123.toml"), []byte("id = 'whmcs-123'\nstate = 'active'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.Get("whmcs-123")
+	if err != nil || got.MatomoID != 0 {
+		t.Fatalf("legacy service = %#v, %v", got, err)
 	}
 }

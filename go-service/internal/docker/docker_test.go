@@ -3,6 +3,7 @@ package docker
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -199,6 +200,29 @@ func TestSortVersionsNewestFirst(t *testing.T) {
 	sortVersionsNewestFirst(versions)
 	if versions[0].Version != "new" {
 		t.Fatalf("newest version must be first: %#v", versions)
+	}
+}
+
+func TestContainerSpecMatomo(t *testing.T) {
+	for _, slot := range []string{"blue", "green"} {
+		for _, id := range []uint32{0, 123, 4294967295} {
+			service := model.Service{ID: "whmcs-123", Version: "v1", MatomoID: id,
+				Deploy: map[string]model.Deploy{slot: {Socket: "/run/test.sock"}}}
+			cfg := config.Docker{Environment: []string{"ME_CONF__matomo__id=999", "ME_CONF__matomo__id", "OTHER=keep", "ME_CONF__matomo__id=888"}}
+			spec, _, _, err := ContainerSpec(cfg, service, slot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var values []string
+			for _, value := range spec.Env {
+				if name, _, _ := strings.Cut(value, "="); name == "ME_CONF__matomo__id" {
+					values = append(values, value)
+				}
+			}
+			if id == 0 && len(values) != 0 || id > 0 && (len(values) != 1 || values[0] != fmt.Sprintf("ME_CONF__matomo__id=%d", id)) || !slices.Contains(spec.Env, "OTHER=keep") {
+				t.Fatalf("slot=%s id=%d environment=%v", slot, id, spec.Env)
+			}
+		}
 	}
 }
 

@@ -147,7 +147,7 @@ assert(Capsule::$services[123]['staging_label'] === 'example-stage');
 
 assert(moddhosting_updateConfig($params + ['staging_hostname' => ''], $versions) === 'success');
 assert(Capsule::$services[123] === ['image_version' => 'v26.6.8', 'staging_label' => '']);
-assert(moddhosting_updateConfig($params, $versions) === 'Provide image_version or staging_hostname.');
+assert(moddhosting_updateConfig($params, $versions) === 'Provide image_version, staging_hostname or matomo_id.');
 
 Capsule::$services = [];
 $_POST = ['moddhosting_fields' => '1', 'modulefields' => ['v26.7.0', 'Same-State']];

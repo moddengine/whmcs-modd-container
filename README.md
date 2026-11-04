@@ -294,6 +294,13 @@ and bulk upgrades.
 The Docker images page also pulls the latest stable `v*` tag or an exact
 PR/dev tag on every configured controller.
 
+Matomo site IDs are retained in WHMCS across suspension and termination.
+Administrators can enter or clear the **Matomo ID** on the product/service
+page; the next **Deploy** or **Unsuspend** passes it to the container as
+`ME_CONF__matomo__id`. Configure the shared Matomo URL and API token in the
+addon to create missing IDs during **Create/Deploy**. Import existing IDs
+before enabling automatic creation; see the [WHMCS module guide](whmcs-plugin/README.md).
+
 ## Development
 
 Run controller tests:
@@ -303,11 +310,12 @@ cd go-service
 ./build.sh test
 ```
 
-Run PHP static analysis:
+Run PHP tests and static analysis:
 
 ```sh
 cd whmcs-plugin
 composer install
+composer test
 composer analyse
 ```
 

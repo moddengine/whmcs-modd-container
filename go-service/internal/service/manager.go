@@ -206,8 +206,8 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 		derive(&existing)
 	}
 	m.mu.Unlock()
-	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.PublicIPv4 == publicIPv4 && existing.Version == req.Version && existing.TargetVersion == req.Version && !req.ForceRedeploy) {
-		return m.reconcile(ctx, id, mainDomain, stagingDomain, publicIPv4, req.Version, req.DisplayName, packageValues, requestID, req.ForceRedeploy)
+	if existingErr == nil && !(existing.Phase == "failed" && existing.Operation == "provision" && existing.MainDomain == mainDomain && existing.StagingDomain == stagingDomain && existing.PublicIPv4 == publicIPv4 && existing.Version == req.Version && existing.TargetVersion == req.Version && !req.ForceRedeploy && (req.MatomoID == nil || existing.MatomoID == *req.MatomoID)) {
+		return m.reconcile(ctx, id, mainDomain, stagingDomain, publicIPv4, req.Version, req.DisplayName, packageValues, requestID, req.ForceRedeploy, req.MatomoID)
 	}
 	if existingErr != nil && !errors.Is(existingErr, state.ErrNotFound) {
 		return nil, false, internal(existingErr)
@@ -265,6 +265,9 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 				"green": deployment(m.Config.Deployment.Socket, id, "green", ""),
 			},
 		}
+		if req.MatomoID != nil {
+			service.MatomoID = *req.MatomoID
+		}
 		if m.dnsEnabled() {
 			service.DNSStatus = "pending"
 		}
@@ -274,6 +277,9 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 		}
 	}
 	if retry != nil {
+		if req.MatomoID != nil {
+			service.MatomoID = *req.MatomoID
+		}
 		service.LastError, service.UpdatedAt = "", time.Now().UTC()
 		if err := m.Repo.Put(service); err != nil {
 			m.mu.Unlock()
@@ -323,7 +329,7 @@ func (m *Manager) Provision(ctx context.Context, id string, req model.ProvisionR
 	return status, true, err
 }
 
-func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, publicIPv4, version, displayName string, packageValues map[string]string, requestID string, forceRedeploy bool) (*model.Status, bool, error) {
+func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, publicIPv4, version, displayName string, packageValues map[string]string, requestID string, forceRedeploy bool, matomoID *uint32) (*model.Status, bool, error) {
 	m.mu.Lock()
 	service, err := m.liveService(id)
 	if err != nil {
@@ -333,14 +339,15 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 	derive(&service)
 	state, phase := service.State, service.Phase
 	sameVersion := service.Version == version
+	matomoChanged := matomoID != nil && service.MatomoID != *matomoID
 	m.mu.Unlock()
 
 	if replaceableActivation(service) {
-		return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4, packageValues, forceRedeploy)
+		return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4, packageValues, forceRedeploy, matomoID)
 	}
 	if state == model.Active {
-		if !sameVersion || forceRedeploy {
-			return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4, packageValues, forceRedeploy)
+		if !sameVersion || forceRedeploy || matomoChanged || (phase == "failed" && service.Operation == "upgrade") {
+			return m.upgrade(ctx, id, model.UpgradeRequest{Version: version}, requestID, mainDomain, stagingDomain, publicIPv4, packageValues, forceRedeploy, matomoID)
 		}
 		if phase != "running" {
 			return nil, false, conflict(fmt.Errorf("cannot deploy hostname while service is %s", phase))
@@ -348,6 +355,20 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 	} else if state == model.Suspended {
 		if phase != "stopped" {
 			return nil, false, conflict(fmt.Errorf("cannot deploy hostname while service is %s", phase))
+		}
+		if matomoChanged {
+			m.mu.Lock()
+			service, err = m.liveService(id)
+			if err == nil && service.State == model.Suspended && service.Phase == "stopped" {
+				service.MatomoID = *matomoID
+				err = m.Repo.Put(service)
+			} else if err == nil {
+				err = conflict(errors.New("service state changed during redeployment"))
+			}
+			m.mu.Unlock()
+			if err != nil {
+				return nil, false, err
+			}
 		}
 	} else if state == model.Terminated {
 		if phase != "stopped" {
@@ -363,6 +384,9 @@ func (m *Manager) reconcile(ctx context.Context, id, mainDomain, stagingDomain, 
 		m.mu.Lock()
 		service, err = m.liveService(id)
 		if err == nil && service.State == model.Terminated && service.Phase == "stopped" {
+			if matomoID != nil {
+				service.MatomoID = *matomoID
+			}
 			service.MainDomain, service.StagingDomain, service.PublicIPv4 = mainDomain, stagingDomain, publicIPv4
 			service.Version, service.DisplayName, service.Package, service.UpdatedAt = version, displayName, packageValues, time.Now().UTC()
 			service.Deploy[service.LiveDeploy] = deployment(m.Config.Deployment.Socket, id, service.LiveDeploy, version)
@@ -485,6 +509,10 @@ func (m *Manager) Resume(ctx context.Context, id string, req model.ResumeRequest
 	}
 	derive(&service)
 	if service.State == model.Active && service.Phase == "running" {
+		if req.MatomoID != nil && service.MatomoID != *req.MatomoID {
+			m.mu.Unlock()
+			return m.upgrade(ctx, id, model.UpgradeRequest{Version: service.Version}, requestID, "", "", "", packageValues, false, req.MatomoID)
+		}
 		m.mu.Unlock()
 		service, err = m.queueDNS(service)
 		if err != nil {
@@ -503,6 +531,9 @@ func (m *Manager) Resume(ctx context.Context, id string, req model.ResumeRequest
 	}
 	if packageValues == nil {
 		packageValues = service.Package
+	}
+	if req.MatomoID != nil {
+		service.MatomoID = *req.MatomoID
 	}
 	target := opposite(service.LiveDeploy)
 	service.Phase, service.Operation, service.TargetDeploy, service.TargetVersion = "starting", "resume", target, service.Version
@@ -719,7 +750,7 @@ func (m *Manager) Delete(ctx context.Context, id, requestID string) (*model.Tomb
 }
 
 func (m *Manager) Upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID string) (*model.Status, bool, error) {
-	return m.upgrade(ctx, id, req, requestID, "", "", "", nil, false)
+	return m.upgrade(ctx, id, req, requestID, "", "", "", nil, false, nil)
 }
 
 func (m *Manager) QueueBulkUpgrade(ctx context.Context, req model.BulkUpgradeRequest, requestID string) (*model.BulkUpgradeJob, error) {
@@ -1014,7 +1045,7 @@ func (m *Manager) logBulkUpgradeError(message string, err error) {
 	}
 }
 
-func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID, targetMainDomain, targetStagingDomain, targetPublicIPv4 string, targetPackage map[string]string, forceRedeploy bool) (*model.Status, bool, error) {
+func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeRequest, requestID, targetMainDomain, targetStagingDomain, targetPublicIPv4 string, targetPackage map[string]string, forceRedeploy bool, matomoID *uint32) (*model.Status, bool, error) {
 	if err := dockeradapter.ValidateVersion(req.Version); err != nil {
 		return nil, false, badRequest(err)
 	}
@@ -1025,7 +1056,7 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		return nil, false, err
 	}
 	derive(&service)
-	done, validationErr := validateUpgrade(service, req, forceRedeploy)
+	done, validationErr := validateUpgrade(service, req, forceRedeploy || (matomoID != nil && service.MatomoID != *matomoID))
 	m.mu.Unlock()
 	if validationErr != nil {
 		return nil, false, validationErr
@@ -1052,7 +1083,7 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 		return nil, false, err
 	}
 	derive(&service)
-	done, validationErr = validateUpgrade(service, req, forceRedeploy)
+	done, validationErr = validateUpgrade(service, req, forceRedeploy || (matomoID != nil && service.MatomoID != *matomoID))
 	if validationErr != nil {
 		m.mu.Unlock()
 		return nil, false, validationErr
@@ -1092,6 +1123,9 @@ func (m *Manager) upgrade(ctx context.Context, id string, req model.UpgradeReque
 	service.TargetMainDomain, service.TargetStagingDomain = targetMainDomain, targetStagingDomain
 	service.TargetPublicIPv4 = targetPublicIPv4
 	service.TargetPackage = targetPackage
+	if matomoID != nil {
+		service.MatomoID = *matomoID
+	}
 	service.Deploy[target] = deployment(m.Config.Deployment.Socket, id, target, req.Version)
 	if err := m.Repo.Put(service); err != nil {
 		m.mu.Unlock()
@@ -1166,7 +1200,7 @@ func validateUpgrade(service model.Service, req model.UpgradeRequest, forceRedep
 	if busy(service.Phase) && service.Phase != "waiting_for_health" {
 		return false, conflict(fmt.Errorf("%s is already in progress", service.Operation))
 	}
-	if req.Version == service.Version && !forceRedeploy && service.Phase != "waiting_for_health" && !replaceableActivation(service) {
+	if req.Version == service.Version && !forceRedeploy && service.Phase != "waiting_for_health" && service.Phase != "failed" && !replaceableActivation(service) {
 		return true, nil
 	}
 	cmp, ordered := dockeradapter.CompareVersions(req.Version, service.Version)

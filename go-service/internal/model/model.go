@@ -10,6 +10,7 @@ const (
 )
 
 type ProvisionRequest struct {
+	MatomoID      *uint32           `json:"matomo_id,omitempty"`
 	MainDomain    string            `json:"main_domain"`
 	StagingDomain string            `json:"staging_domain,omitempty"`
 	PublicIPv4    string            `json:"public_ipv4"`
@@ -20,7 +21,8 @@ type ProvisionRequest struct {
 }
 
 type ResumeRequest struct {
-	Package map[string]string `json:"package,omitempty"`
+	MatomoID *uint32           `json:"matomo_id,omitempty"`
+	Package  map[string]string `json:"package,omitempty"`
 }
 
 type UpgradeRequest struct {
@@ -53,6 +55,7 @@ type BulkUpgradeItem struct {
 }
 
 type Service struct {
+	MatomoID            uint32            `toml:"matomo_id,omitempty" json:"matomo_id"`
 	ID                  string            `toml:"id" json:"id"`
 	State               string            `toml:"state" json:"state"`
 	MainDomain          string            `toml:"main_domain" json:"main_domain"`
