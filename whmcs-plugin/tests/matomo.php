@@ -100,7 +100,8 @@ namespace ModdHosting {
             }
             $GLOBALS["matomoRequests"][] = $body;
             if ($body["method"] === "SitesManager.updateSite" || $body["method"] === "SitesManager.setSiteAliasUrls") {
-                assert(!isset($body["group"]) && !isset($body["excludeUnknownUrls"]));
+                assert(!isset($body["excludeUnknownUrls"]));
+                assert($body["method"] === "SitesManager.updateSite" ? $body["group"] === "whmcs-123" : !isset($body["group"]));
                 assert(\WHMCS\Database\Capsule::$services[123]["matomo_id"] === (int) $body["idSite"], "sync before saving site ID");
                 $next = array_shift($GLOBALS["updateResponses"]);
                 [$GLOBALS["curlStatus"], $response] = $next ?? [200, $body["method"] === "SitesManager.setSiteAliasUrls" ? '{"value":0}' : "{\"result\":\"success\"}"];
@@ -172,6 +173,7 @@ namespace {
     assert(Capsule::$services[123]["matomo_id"] === 71);
     assert(end($matomoRequests)["siteName"] === "example.com #123");
     assert(end($matomoRequests)["urls"] === ["https://example.com", "https://preview.stage.example"]);
+    assert(end($matomoRequests)["group"] === "whmcs-123");
     assert(Capsule::$services[123]["matomo_last_error"] === "");
     assert(str_contains(moddhosting_matomo_field($params), "Status: OK"));
     assert(Capsule::$services[123]["matomo_attempt"] === null);
@@ -187,7 +189,7 @@ namespace {
     assert(moddhosting_TerminateAccount($params) === "success");
     assert(Capsule::$services[123]["matomo_id"] === 71);
 
-    // Deploy replaces the full URL list and name while retaining the assigned ID and remote group.
+    // Deploy replaces the full URL list and name, and normalizes the group without changing the ID.
     assert(end($matomoRequests)["method"] === "SitesManager.updateSite");
     assert(end($matomoRequests)["urls"] === ["https://example.com", "https://preview.stage.example"]);
     Capsule::$services[123]["staging_label"] = "";
@@ -196,7 +198,7 @@ namespace {
     assert($sync["method"] === "SitesManager.updateSite");
     assert($sync["siteName"] === "new.example #123");
     assert($sync["urls"] === ["https://new.example"]);
-    assert(!isset($sync["group"]) && !isset($sync["excludeUnknownUrls"]));
+    assert($sync["group"] === "whmcs-123" && !isset($sync["excludeUnknownUrls"]));
     assert(end($matomoRequests)["method"] === "SitesManager.setSiteAliasUrls");
     assert(!isset(end($matomoRequests)["urls"]));
     assert(Capsule::$services[123]["matomo_id"] === 71);
@@ -371,6 +373,20 @@ namespace {
     assert(end($matomoRequests)["urls"] === ["https://example.com", "https://preview.stage.example"]);
     assert(moddhosting_matomo_id($params, true, "preview.stage.example") === 201);
     assert(Capsule::$services[123]["matomo_last_error"] === "");
+    assert(end($matomoRequests)["group"] === "whmcs-123");
+
+    // A failed group normalization keeps the assigned ID, so retry never creates another site.
+    moddhosting_updateConfig($params + ["matomo_id" => ""]);
+    $responses = [[200, '{"value":202}']];
+    $updateResponses = [[200, '{"result":"error"}']];
+    assert(moddhosting_matomo_id($params, true) === 202);
+    assert(Capsule::$services[123]["matomo_id"] === 202);
+    assert(Capsule::$services[123]["matomo_attempt"] === null);
+    assert(Capsule::$services[123]["matomo_last_error"] !== "");
+    $creations = count(array_filter($matomoRequests, static fn(array $request): bool => $request["method"] === "SitesManager.addSite"));
+    assert(moddhosting_matomo_id($params, true) === 202);
+    assert(Capsule::$services[123]["matomo_last_error"] === "");
+    assert(count(array_filter($matomoRequests, static fn(array $request): bool => $request["method"] === "SitesManager.addSite")) === $creations);
     // New rows still record configuration failures without a preexisting service record.
     Capsule::$services = [];
     Capsule::$settings["matomoUrl"] = "";

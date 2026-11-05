@@ -79,7 +79,7 @@ function moddhosting_matomo_id(array $params, bool $create, string $stagingDomai
                 if ($domain === "") {
                     throw new \InvalidArgumentException("Matomo requires a valid main domain.");
                 }
-                $site = ["siteName" => $domain . " #" . (int) $params["serviceid"], "urls[0]" => "https://" . $domain];
+                $site = ["siteName" => $domain . " #" . (int) $params["serviceid"], "group" => "whmcs-" . (int) $params["serviceid"], "urls[0]" => "https://" . $domain];
                 if ($stagingDomain !== "" && $stagingDomain !== $domain) {
                     $site["urls[1]"] = "https://" . $stagingDomain;
                 }
@@ -109,7 +109,7 @@ function moddhosting_matomo_id(array $params, bool $create, string $stagingDomai
                             throw new \RuntimeException("Unable to persist Matomo creation attempt.");
                         }
                         try {
-                            $id = moddhosting_parse_matomo_id($client->request("SitesManager.addSite", $site + ["group" => $attempt, "excludeUnknownUrls" => "1"]));
+                            $id = moddhosting_parse_matomo_id($client->request("SitesManager.addSite", ["group" => $attempt, "excludeUnknownUrls" => "1"] + $site));
                             if ($id === null) {
                                 throw new \RuntimeException("Matomo returned no site ID; the result is unknown.");
                             }
@@ -124,14 +124,12 @@ function moddhosting_matomo_id(array $params, bool $create, string $stagingDomai
                     if ($query->update(["matomo_id" => $id, "matomo_attempt" => null]) !== 1) {
                         throw new \RuntimeException("Unable to persist Matomo site ID; the creation attempt is retained for recovery.");
                     }
-                    // Save a recovered legacy ID before renaming its marker-bearing site.
+                    // Persist the ID before replacing its remote recovery marker.
                     $savedId = $id;
                 }
-                if (!$created) {
-                    $result = $client->request("SitesManager.updateSite", ["idSite" => (string) $id] + $site);
-                    if (!is_array($result) || ($result["result"] ?? "") !== "success") {
-                        throw new \RuntimeException("Matomo returned an invalid site update response.");
-                    }
+                $result = $client->request("SitesManager.updateSite", ["idSite" => (string) $id] + $site);
+                if (!is_array($result) || ($result["result"] ?? "") !== "success") {
+                    throw new \RuntimeException("Matomo returned an invalid site update response.");
                 }
                 if (!$created && !isset($site["urls[1]"])) {
                     $aliases = $client->request("SitesManager.setSiteAliasUrls", ["idSite" => (string) $id]);

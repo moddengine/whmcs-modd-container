@@ -80,8 +80,8 @@ to controllers or containers. New sites are named exactly `example.com #123`
 full HTTPS main hostname and the full HTTPS staging hostname when enabled;
 **Only Track Visits matching URLs** is enabled at creation. Each subsequent
 WHMCS Create/Deploy (including package changes) synchronizes that same site's
-name and replaces its URL list, removing old main or staging hostnames. Existing
-tracking restrictions and imported site groups are preserved. Unsuspend only
+name, sets its group to `whmcs-<service_id>`, and replaces its URL list, removing
+old main or staging hostnames. Existing tracking restrictions are preserved. Unsuspend only
 forwards the saved ID and never calls Matomo.
 
 Provisioning continues if Matomo synchronization fails. An already assigned ID
@@ -94,8 +94,9 @@ tokens are redacted before storage or logging. Replacing/clearing an ID resets
 its status; saving the same ID preserves it. Clearing an ID allows the next Deploy to
 create another remote site; it does not delete the previous Matomo site.
 An uncertain creation result leaves a pending attempt to prevent duplicates.
-The random attempt marker is saved in the new Matomo site's group and retained
-after success. Deploy recovers only an exact group match, or an exact site-name
+The random attempt marker is temporarily saved in the new Matomo site's group.
+Once the ID is persisted, the group is changed to `whmcs-<service_id>`; existing
+sites receive that group on their next Deploy. Deploy recovers only an exact group match, or an exact site-name
 match for pending creations made by older module versions. Recovered IDs are
 saved before renaming the site. Check Matomo for the displayed marker and enter
 its ID if automatic recovery cannot find exactly one site. An ordinary Save
