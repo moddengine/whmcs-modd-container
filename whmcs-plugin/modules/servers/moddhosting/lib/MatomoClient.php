@@ -71,6 +71,7 @@ final class MatomoClient
         if ($status < 200 || $status >= 300) {
             throw new MatomoException("Matomo HTTP request failed (" . $status . "); the result is unknown.");
         }
-        return $result;
+        // Matomo renders scalar API results inside a single "value" field.
+        return is_array($result) && array_keys($result) === ["value"] ? $result["value"] : $result;
     }
 }

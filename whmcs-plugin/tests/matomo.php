@@ -103,7 +103,7 @@ namespace ModdHosting {
                 assert(!isset($body["group"]) && !isset($body["excludeUnknownUrls"]));
                 assert(\WHMCS\Database\Capsule::$services[123]["matomo_id"] === (int) $body["idSite"], "sync before saving site ID");
                 $next = array_shift($GLOBALS["updateResponses"]);
-                [$GLOBALS["curlStatus"], $response] = $next ?? [200, $body["method"] === "SitesManager.setSiteAliasUrls" ? "0" : "{\"result\":\"success\"}"];
+                [$GLOBALS["curlStatus"], $response] = $next ?? [200, $body["method"] === "SitesManager.setSiteAliasUrls" ? '{"value":0}' : "{\"result\":\"success\"}"];
                 if ($response instanceof \Throwable) {
                     throw $response;
                 }
@@ -167,7 +167,7 @@ namespace {
     assert($matomoRequests === []);
 
     Capsule::$services[123]["staging_label"] = "preview";
-    $responses = [[200, "71"]];
+    $responses = [[200, '{"value":71}']];
     assert(moddhosting_CreateAccount($params) === "success");
     assert(Capsule::$services[123]["matomo_id"] === 71);
     assert(end($matomoRequests)["siteName"] === "example.com #123");
@@ -342,7 +342,7 @@ namespace {
     Capsule::$busy = false;
 
     // Invalid/scalar/redirect/HTTP error responses remain pending and never leak tokens.
-    foreach ([[200, "not json"], [200, "{}"], [200, "0"], [302, "122"], [500, "122"]] as $response) {
+    foreach ([[200, "not json"], [200, "{}"], [200, "0"], [200, '{"value":0}'], [200, '{"value":true}'], [200, '{"value":null}'], [200, '{"value":1.5}'], [302, "122"], [500, "122"]] as $response) {
         moddhosting_updateConfig($params + ["matomo_id" => ""]);
         $responses = [$response];
         assert(moddhosting_matomo_id($params, true) === 0);
