@@ -217,7 +217,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
             'Hostname' => $field('hostname', moddhosting_hostname_summary($deployedHost, $deployedStaging, $hostnameStatus)),
             'DNS Status' => $field('dns', moddhosting_dns_summary($status)),
             'Controller State' => $field('state', moddhosting_escape((string) ($status['state'] ?? 'unknown'))),
-            'Deployed Version' => $field('version', moddhosting_escape((string) ($status['version'] ?? 'not provisioned') . ' (' . moddhosting_service_id($params) . '-' . ($status['live_deploy'] ?? 'unknown') . ')')),
+            'Deployed Version' => $field('version', moddhosting_deployed_version($params, $status)),
             'Disk Used' => $field('disk', number_format((int) ($status['dataset_used_bytes'] ?? 0)) . ' bytes'),
             'Monthly Traffic' => $field('traffic', number_format((int) ($status['metrics']['monthly_traffic_bytes'] ?? 0)) . ' bytes'),
             'Email Sends' => $field('email', number_format((int) ($status['metrics']['email_sends'] ?? 0))),
@@ -551,6 +551,40 @@ function moddhosting_hostname_summary(string $live, string $staging, string $sta
     $live = $live === '' ? 'not provisioned' : '<a href="https://' . moddhosting_escape($live) . '" target="_blank" rel="noopener noreferrer">' . moddhosting_escape($live) . '</a>';
     $staging = $staging === '' ? 'disabled' : '<a href="https://' . moddhosting_escape($staging) . '" target="_blank" rel="noopener noreferrer">' . moddhosting_escape($staging) . '</a>';
     return $live . ' (Staging: ' . $staging . ') ' . $status;
+}
+
+/**
+ * @param array<string, mixed> $params
+ * @param array<string, mixed> $status
+ */
+function moddhosting_deployed_version(array $params, array $status): string
+{
+    $slot = $status['live_deploy'] ?? '';
+    $version = moddhosting_escape((string) ($status['version'] ?? 'not provisioned'));
+    if (!in_array($slot, ['blue', 'green'], true)) {
+        return $version . ' (' . moddhosting_service_id($params) . '-unknown)';
+    }
+
+    $container = strtoupper(moddhosting_service_id($params)) . '-' . $slot;
+    $summary = $version . ' (' . $container . ')';
+    if (($status['deployments'][$slot]['runtime'] ?? '') !== 'running') {
+        return $summary;
+    }
+
+    $serverHost = strtolower(rtrim(trim((string) ($params['serverhostname'] ?? '')), '.'));
+    if (!preg_match('/\Acontrol(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.modd\.net\.au)\z/', $serverHost, $matches)) {
+        return $summary;
+    }
+
+    $query = http_build_query([
+        'g0.range_input' => '24h',
+        'g0.relative_time' => 'last_24_hours',
+        'step' => '15m',
+        'extra_stream_filters' => json_encode(['f' => 'CONTAINER_NAME', 'o' => 'eq', 'v' => $container], JSON_THROW_ON_ERROR),
+        'query' => '*',
+    ], '', '&', PHP_QUERY_RFC3986);
+    $url = 'https://logs' . $matches[1] . '/select/vmui/?#/?' . $query;
+    return $summary . ' <a href="' . moddhosting_escape($url) . '" target="_blank" rel="noopener noreferrer">View logs</a>';
 }
 
 /** @param array<string, mixed> $status */

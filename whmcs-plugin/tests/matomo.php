@@ -166,6 +166,9 @@ namespace ModdHosting {
             [$GLOBALS["curlStatus"], $response] = $GLOBALS["provisionResponse"] ?? [202, "{}"];
             return $response;
         }
+        if (str_ends_with($options[CURLOPT_URL], "/v1/services/whmcs-123")) {
+            return json_encode($GLOBALS["serviceStatus"] ?? (object) [], JSON_THROW_ON_ERROR);
+        }
         return "{}";
     }
     function curl_getinfo(\CurlHandle $handle, int $option): int { return $GLOBALS["curlStatus"]; }
@@ -323,9 +326,32 @@ namespace {
     assert(str_contains(moddhosting_matomo_field($params), "Status: Not Configured"));
     $_POST = [];
 
-    // A form loaded online must still save Matomo edits if the controller drops before Save.
     $onlineFields = moddhosting_AdminServicesTabFields($params);
     assert(str_contains($onlineFields["Image Version"], "moddhosting_fields"));
+
+    $serviceStatus = ["version" => "v1", "deployments" => ["blue" => ["runtime" => "running"], "green" => ["runtime" => "running"]]];
+    foreach (["blue" => "au-52072", "green" => "au-52073"] as $slot => $serverName) {
+        $serviceStatus["live_deploy"] = $slot;
+        $serverParams = array_replace($params, ["serverhostname" => "control.$serverName.modd.net.au"]);
+        $versionField = moddhosting_AdminServicesTabFields($serverParams)["Deployed Version"];
+        $container = "WHMCS-123-" . $slot;
+        assert(str_contains($versionField, "v1 ($container) <a"));
+        assert(str_contains($versionField, 'target="_blank" rel="noopener noreferrer">View logs</a>'));
+        $matched = preg_match('/href="([^"]+)"/', $versionField, $matches);
+        assert($matched === 1);
+        $url = parse_url(html_entity_decode($matches[1]));
+        assert($url["scheme"] === "https" && $url["host"] === "logs.$serverName.modd.net.au");
+        assert($url["path"] === "/select/vmui/" && str_starts_with($url["fragment"], "/?"));
+        parse_str(substr($url["fragment"], 2), $query);
+        assert($query["g0_range_input"] === "24h" && $query["g0_relative_time"] === "last_24_hours" && $query["query"] === "*");
+        assert(json_decode($query["extra_stream_filters"], true) === ["f" => "CONTAINER_NAME", "o" => "eq", "v" => $container]);
+    }
+    assert(!str_contains(moddhosting_AdminServicesTabFields($params)["Deployed Version"], "View logs"));
+    $serviceStatus["deployments"]["green"]["runtime"] = "stopped";
+    assert(!str_contains(moddhosting_AdminServicesTabFields($serverParams)["Deployed Version"], "View logs"));
+    unset($serviceStatus);
+
+    // A form loaded online must still save Matomo edits if the controller drops before Save.
     $controllerOffline = true;
     $_POST = ["moddhosting_fields" => "1", "modulefields" => ["v1", ""], "moddhosting_matomo_id" => "83"];
     moddhosting_AdminServicesTabFieldsSave($params);
