@@ -12,6 +12,13 @@ Create a WHMCS server using module `Modd Container Hosting`:
 Choose the image version on each service's admin page; choices come from the
 selected controller with the most recent image first. Save the service before
 running Create for initial provisioning or Deploy to reconcile its hostname and image.
+
+**Create** requires the WHMCS DNS addon to be active and configured in the same
+WHMCS installation. It enables a DNS zone for the service's main hostname
+before sending the provisioning request to the controller. If DNS setup fails,
+correct the error and retry **Create**. The controller's DNS API key still needs
+access to the managed zone to sync website records.
+
 The staging hostname field accepts a label of up to 32 characters and displays
 the controller's configured suffix beside it; leave it blank to disable staging.
 Per-service image versions and staging labels are kept in

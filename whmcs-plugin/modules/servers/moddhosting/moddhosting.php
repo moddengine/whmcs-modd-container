@@ -48,18 +48,54 @@ function moddhosting_provision(array $params): string
 {
     try {
         $stagingDomain = moddhosting_selected_staging($params);
-        return moddhosting_call($params, 'PUT', '/v1/services/' . moddhosting_service_id($params), [
+        $body = [
             'main_domain' => (string) $params['domain'],
-            'matomo_id' => moddhosting_matomo_id($params, true, $stagingDomain),
-			'staging_domain' => $stagingDomain,
-			'public_ipv4' => trim((string) $params['serverip']),
+            'staging_domain' => $stagingDomain,
+            'public_ipv4' => trim((string) $params['serverip']),
             'version' => moddhosting_selected_version($params),
             'display_name' => 'WHMCS service ' . (int) $params['serviceid'],
             'package' => moddhosting_package($params),
             'force_redeploy' => (bool) ($params['force_redeploy'] ?? false),
-        ]);
+        ];
+        if (!$body['force_redeploy']) {
+            moddhosting_enable_dns((int) $params['serviceid'], $body['main_domain']);
+        }
+        $body['matomo_id'] = moddhosting_matomo_id($params, true, $stagingDomain);
+        return moddhosting_call($params, 'PUT', '/v1/services/' . moddhosting_service_id($params), $body);
     } catch (\Throwable $error) {
         return $error->getMessage();
+    }
+}
+
+function moddhosting_enable_dns(int $serviceId, string $hostname): void
+{
+    $hostname = strtolower(rtrim(trim($hostname), '.'));
+    if (filter_var($hostname, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) === false) {
+        throw new \InvalidArgumentException('WHMCS DNS requires a valid hosting hostname.');
+    }
+
+    $addon = dirname(__DIR__, 2) . '/addons/whmcs_dns/whmcs_dns.php';
+    if (!function_exists('whmcs_dns_enable_domain') && is_file($addon)) {
+        require_once $addon;
+    }
+    if (!function_exists('whmcs_dns_enable_domain')
+        || !function_exists('whmcs_dns_cpanel_record_context')
+        || !function_exists('whmcs_dns_provider_record_config')) {
+        throw new \RuntimeException('Install and activate a compatible WHMCS DNS addon to create Modd Hosting services.');
+    }
+
+    // The addon's hostname-only lookup includes pending services and rejects conflicting claims.
+    $context = whmcs_dns_cpanel_record_context(0, '', $hostname);
+    $clientId = (int) Capsule::table('tblhosting')->where('id', $serviceId)->value('userid');
+    if ($clientId <= 0 || $context['client_id'] !== $clientId) {
+        throw new \RuntimeException('The WHMCS DNS zone does not match the hosting service owner.');
+    }
+
+    $config = whmcs_dns_provider_record_config($context['zone']);
+    try {
+        whmcs_dns_enable_domain($clientId, $config);
+    } catch (\Throwable $error) {
+        throw new \RuntimeException('WHMCS DNS could not enable hosting for ' . $context['zone'] . '. Check the DNS addon and provider zone.', 0, $error);
     }
 }
 

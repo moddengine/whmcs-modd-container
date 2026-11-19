@@ -51,6 +51,10 @@ namespace WHMCS\Database {
         }
         public function value(string $column): mixed
         {
+            if ($this->table === "tblhosting") {
+                assert($this->filters === ["id" => 123] && $column === "userid");
+                return 7;
+            }
             if ($this->table === "tbladdonmodules") {
                 return Capsule::$settings[$this->filters["setting"]] ?? null;
             }
@@ -144,6 +148,9 @@ namespace ModdHosting {
             return $response;
         }
         $GLOBALS["controllerRequests"][] = $options;
+        if ($options[CURLOPT_CUSTOMREQUEST] === "PUT") {
+            $GLOBALS["provisionEvents"][] = "controller";
+        }
         $GLOBALS["curlStatus"] = 200;
         if ($GLOBALS["controllerOffline"] ?? false) {
             return false;
@@ -199,6 +206,42 @@ namespace {
     assert(moddhosting_matomo_id($params, false) === 0); // Unsuspend never creates.
     assert($matomoRequests === []);
 
+    $provisionEvents = [];
+    assert(moddhosting_CreateAccount(array_replace($params, ["domain" => "_bad.example.com"])) === "WHMCS DNS requires a valid hosting hostname.");
+    assert(str_contains(moddhosting_CreateAccount($params), "Install and activate a compatible WHMCS DNS addon"));
+
+    if (!function_exists('whmcs_dns_enable_domain')) {
+        function whmcs_dns_cpanel_record_context(int $serverId, string $user, string $domain): array
+        {
+            assert([$serverId, $user, $domain] === [0, "", "example.com"]);
+            return ["client_id" => $GLOBALS["dnsOwner"], "zone" => "example.com"];
+        }
+        function whmcs_dns_provider_record_config(string $domain): array
+        {
+            return ["domain_name" => $domain, "provider" => "Bunny", "apikey" => "provider-token"];
+        }
+        function whmcs_dns_enable_domain(int $clientId, array $config): bool
+        {
+            assert($clientId === 7 && $config["domain_name"] === "example.com");
+            if ($GLOBALS["dnsFails"]) {
+                throw new \RuntimeException("provider-token rejected");
+            }
+            $GLOBALS["provisionEvents"][] = "dns";
+            $created = !$GLOBALS["dnsEnabled"];
+            $GLOBALS["dnsEnabled"] = true;
+            return $created;
+        }
+    }
+
+    $dnsOwner = 8;
+    assert(str_contains(moddhosting_CreateAccount($params), "does not match the hosting service owner"));
+    $dnsOwner = 7;
+    $dnsFails = true;
+    assert(moddhosting_CreateAccount($params) === "WHMCS DNS could not enable hosting for example.com. Check the DNS addon and provider zone.");
+    assert($provisionEvents === [] && $matomoRequests === []);
+    $dnsFails = $dnsEnabled = false;
+    $controllerRequests = [];
+
     Capsule::$services[123]["staging_label"] = "preview";
     $responses = [[200, '{"value":71}']];
     assert(moddhosting_CreateAccount($params) === "success");
@@ -211,8 +254,11 @@ namespace {
     assert(Capsule::$services[123]["matomo_attempt"] === null);
     assert(json_decode(end($controllerRequests)[CURLOPT_POSTFIELDS], true)["matomo_id"] === 71);
     assert(count(array_filter($controllerRequests, static fn(array $request): bool => str_ends_with($request[CURLOPT_URL], "/v1/info"))) === 1);
+    assert($provisionEvents === ["dns", "controller"]);
+    assert(moddhosting_CreateAccount($params) === "success"); // The addon returns false for an existing zone.
     assert(moddhosting_deploy($params) === "success");
     assert(moddhosting_ChangePackage($params) === "success");
+    assert($provisionEvents === ["dns", "controller", "dns", "controller", "controller", "controller"]);
     assert(count(array_filter($matomoRequests, static fn(array $request): bool => $request["method"] === "SitesManager.addSite")) === 1);
     $beforeUnsuspend = count($matomoRequests);
     assert(moddhosting_UnsuspendAccount($params) === "success");
