@@ -92,6 +92,8 @@ namespace Illuminate\Database\Schema {
     {
         public function unsignedInteger(string $column): ColumnDefinition {}
 
+        public function unsignedBigInteger(string $column): ColumnDefinition {}
+
         public function string(string $column, int $length = 255): ColumnDefinition {}
     }
 

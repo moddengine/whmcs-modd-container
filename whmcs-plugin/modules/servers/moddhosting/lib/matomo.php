@@ -18,26 +18,6 @@ function moddhosting_parse_matomo_id(mixed $value): ?int
     return (int) $value;
 }
 
-/**
- * @template T
- * @param callable(): T $callback
- * @return T
- */
-function moddhosting_matomo_lock(int $serviceId, callable $callback): mixed
-{
-    $connection = Capsule::connection();
-    $name = "moddhosting:matomo:" . $serviceId;
-    $lock = $connection->selectOne("SELECT GET_LOCK(?, 30) AS acquired", [$name]);
-    if ((int) ($lock->acquired ?? 0) !== 1) {
-        throw new \RuntimeException("Matomo service configuration is busy; retry later.");
-    }
-    try {
-        return $callback();
-    } finally {
-        $connection->selectOne("SELECT RELEASE_LOCK(?) AS released", [$name]);
-    }
-}
-
 /** @param array<string, mixed> $params */
 function moddhosting_matomo_field(array $params): string
 {
@@ -57,7 +37,7 @@ function moddhosting_matomo_id(array $params, bool $create, string $stagingDomai
     $token = "";
     $savedId = 0;
     try {
-        return moddhosting_matomo_lock((int) $params["serviceid"], static function () use ($params, $create, $stagingDomain, &$token, &$savedId): int {
+        return moddhosting_service_lock("matomo", (int) $params["serviceid"], static function () use ($params, $create, $stagingDomain, &$token, &$savedId): int {
             $query = Capsule::table("mod_moddhosting_services")->where("service_id", (int) $params["serviceid"]);
             try {
                 $id = moddhosting_parse_matomo_id($query->value("matomo_id"));

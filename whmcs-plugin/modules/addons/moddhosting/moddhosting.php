@@ -35,6 +35,18 @@ function moddhosting_config(): array
                 'Size' => '64',
                 'Description' => 'Shared superuser API token, required by Matomo to create sites.',
             ],
+            'emailRelayUrl' => [
+                'FriendlyName' => 'Email Relay URL',
+                'Type' => 'text',
+                'Size' => '64',
+                'Description' => 'Shared HTTPS base URL of the ModdEngine email relay.',
+            ],
+            'emailRelayToken' => [
+                'FriendlyName' => 'Email Relay Setup Token',
+                'Type' => 'password',
+                'Size' => '64',
+                'Description' => 'UKU user access token with root site superuser permission.',
+            ],
             'webhookToken' => [
                 'FriendlyName' => 'Docker Hub Webhook Token',
                 'Type' => 'password',
@@ -97,6 +109,19 @@ function moddhosting_install(): void
     if (!$schema->hasColumn('mod_moddhosting_services', 'matomo_last_error')) {
         $schema->table('mod_moddhosting_services', static function (Blueprint $table): void {
             $table->string('matomo_last_error', 1024)->nullable();
+        });
+    }
+
+    foreach (['email_domain' => 253, 'email_configured_domain' => 253, 'email_setup_error' => 255] as $column => $length) {
+        if (!$schema->hasColumn('mod_moddhosting_services', $column)) {
+            $schema->table('mod_moddhosting_services', static function (Blueprint $table) use ($column, $length): void {
+                $table->string($column, $length)->nullable();
+            });
+        }
+    }
+    if (!$schema->hasColumn('mod_moddhosting_services', 'email_relay_id')) {
+        $schema->table('mod_moddhosting_services', static function (Blueprint $table): void {
+            $table->unsignedBigInteger('email_relay_id')->nullable();
         });
     }
 

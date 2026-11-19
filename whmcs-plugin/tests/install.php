@@ -33,6 +33,7 @@ namespace Illuminate\Database\Schema {
     final class Blueprint
     {
         public function unsignedInteger(string $column): ColumnDefinition { return new ColumnDefinition($column, "unsignedInteger"); }
+        public function unsignedBigInteger(string $column): ColumnDefinition { return new ColumnDefinition($column, "unsignedBigInteger"); }
         public function string(string $column, int $length): ColumnDefinition { return new ColumnDefinition($column, "string"); }
     }
     final class ColumnDefinition
@@ -57,10 +58,15 @@ namespace {
     assert(Builder::$columns["matomo_id"] === ["type" => "unsignedInteger", "nullable" => true]);
     assert(Builder::$columns["matomo_attempt"]["nullable"]);
     assert(Builder::$columns["matomo_last_error"]["nullable"]);
+    $emailColumns = ["email_domain", "email_configured_domain", "email_relay_id", "email_setup_error"];
+    foreach ($emailColumns as $column) {
+        assert(Builder::$columns[$column]["nullable"]);
+    }
+    assert(Builder::$columns["email_relay_id"]["type"] === "unsignedBigInteger");
     $schema = Builder::$columns;
     moddhosting_install();
     assert(Builder::$columns === $schema);
-    Builder::$columns = array_diff_key($schema, array_flip(["matomo_id", "matomo_attempt", "matomo_last_error"]));
+    Builder::$columns = array_diff_key($schema, array_flip([...$emailColumns, "matomo_id", "matomo_attempt", "matomo_last_error"]));
     Capsule::$services = [123 => ["image_version" => "v1", "staging_label" => ""]];
     moddhosting_install();
     assert(Builder::$columns === $schema);

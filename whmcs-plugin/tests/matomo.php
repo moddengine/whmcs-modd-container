@@ -8,6 +8,7 @@ namespace WHMCS\Database {
         public static array $services = [];
         public static array $settings = ["matomoUrl" => "https://stats.example", "matomoToken" => "secret-token"];
         public static bool $locked = false;
+        public static ?string $lockName = null;
         public static bool $busy = false;
         public static bool $failIdWrite = false;
         public static bool $failMarkerWrite = false;
@@ -19,14 +20,17 @@ namespace WHMCS\Database {
     {
         public function selectOne(string $sql, array $bindings): object
         {
-            assert($bindings === ["moddhosting:matomo:123"]);
+            assert(in_array($bindings, [["moddhosting:matomo:123"], ["moddhosting:email:123"]], true));
             if (str_contains($sql, "GET_LOCK")) {
                 assert(!Capsule::$locked, "lock acquired twice");
                 Capsule::$locked = !Capsule::$busy;
+                Capsule::$lockName = Capsule::$locked ? $bindings[0] : null;
                 return (object) ["acquired" => (int) Capsule::$locked];
             }
             assert(Capsule::$locked);
+            assert(Capsule::$lockName === $bindings[0]);
             Capsule::$locked = false;
+            Capsule::$lockName = null;
             return (object) ["released" => 1];
         }
         public function transaction(callable $callback): mixed { return $callback(); }
@@ -40,6 +44,11 @@ namespace WHMCS\Database {
         public function whereIn(string $key, array $values): self { return $this; }
         public function select(string ...$args): self { return $this; }
         public function get(): array { return []; }
+        public function first(): ?object
+        {
+            $service = Capsule::$services[$this->filters["service_id"]] ?? null;
+            return $service === null ? null : (object) $service;
+        }
         public function value(string $column): mixed
         {
             if ($this->table === "tbladdonmodules") {
@@ -50,13 +59,17 @@ namespace WHMCS\Database {
         public function updateOrInsert(array $keys, array $values): bool
         {
             $this->filters = $keys;
+            $before = Capsule::$services[$keys["service_id"]] ?? null;
             $this->update($values);
-            return true;
+            return $before !== Capsule::$services[$keys["service_id"]];
         }
         public function update(array $values): int
         {
             if (array_key_exists("matomo_id", $values) || array_key_exists("matomo_attempt", $values) || array_key_exists("matomo_last_error", $values)) {
-                assert(Capsule::$locked, "Matomo write outside the shared lock");
+                assert(Capsule::$lockName === "moddhosting:matomo:123", "Matomo write outside the shared lock");
+            }
+            if (array_intersect_key($values, array_flip(["email_configured_domain", "email_relay_id", "email_setup_error"])) !== []) {
+                assert(Capsule::$lockName === "moddhosting:email:123", "Email setup result written outside the service lock");
             }
             if (Capsule::$failMarkerWrite && isset($values["matomo_attempt"])) {
                 throw new \RuntimeException("marker write failed");
@@ -116,6 +129,20 @@ namespace ModdHosting {
             $GLOBALS["curlErrno"] = $next[2] ?? 0;
             return $response;
         }
+        if (str_ends_with($options[CURLOPT_URL], "/~emailrelay/ses/site")) {
+            assert(\WHMCS\Database\Capsule::$lockName === "moddhosting:email:123");
+            assert($options[CURLOPT_URL] === "https://relay.example/~emailrelay/ses/site");
+            assert($options[CURLOPT_CUSTOMREQUEST] === "POST");
+            assert(in_array("Authorization: Bearer uku_setup-test-token", $options[CURLOPT_HTTPHEADER], true));
+            assert(in_array("Content-Type: application/json", $options[CURLOPT_HTTPHEADER], true));
+            assert($options[CURLOPT_SSL_VERIFYPEER] === true && $options[CURLOPT_SSL_VERIFYHOST] === 2);
+            assert($options[CURLOPT_FOLLOWLOCATION] === false);
+            $GLOBALS["emailRequests"][] = json_decode($options[CURLOPT_POSTFIELDS], true, flags: JSON_THROW_ON_ERROR);
+            $GLOBALS["hostingEvents"][] = "relay";
+            assert($GLOBALS["emailResponses"] !== [], "unexpected email relay request");
+            [$GLOBALS["curlStatus"], $response] = array_shift($GLOBALS["emailResponses"]);
+            return $response;
+        }
         $GLOBALS["controllerRequests"][] = $options;
         $GLOBALS["curlStatus"] = 200;
         if ($GLOBALS["controllerOffline"] ?? false) {
@@ -126,6 +153,11 @@ namespace ModdHosting {
         }
         if (str_ends_with($options[CURLOPT_URL], "/v1/image/versions")) {
             return "{\"versions\":[{\"version\":\"v1\"}]}";
+        }
+        if ($options[CURLOPT_CUSTOMREQUEST] === "PUT") {
+            $GLOBALS["hostingEvents"][] = "controller";
+            [$GLOBALS["curlStatus"], $response] = $GLOBALS["provisionResponse"] ?? [202, "{}"];
+            return $response;
         }
         return "{}";
     }
@@ -393,4 +425,85 @@ namespace {
     assert(moddhosting_matomo_id($params, true) === 0);
     assert(Capsule::$services[123]["matomo_last_error"] !== "");
     assert(!isset(Capsule::$services[123]["matomo_attempt"]));
+
+    // Email is a separate action, with automatic setup after an accepted Create only.
+    assert(moddhosting_AdminCustomButtonArray()["Setup Email"] === "setupEmail");
+    $emailRequests = $emailResponses = $hostingEvents = [];
+    Capsule::$services[123] = ["image_version" => "v1", "matomo_id" => 202];
+    Capsule::$settings["matomoUrl"] = "https://stats.example";
+    assert(moddhosting_CreateAccount($params) === "success");
+    assert(str_contains(moddhosting_email_field($params), "Not configured"));
+    Capsule::$settings["emailRelayUrl"] = "https://relay.example/";
+    assert(moddhosting_CreateAccount($params) === "success");
+    assert(str_contains(moddhosting_email_field($params), "Configure an HTTPS Email Relay URL and a UKU setup token"));
+    Capsule::$settings["emailRelayToken"] = "uku_setup-test-token";
+    $provisionResponse = [422, '{"error":{"message":"Provisioning rejected"}}'];
+    assert(moddhosting_CreateAccount($params) === "Provisioning rejected");
+    $provisionResponse = [202, "{}"];
+    assert(moddhosting_deploy($params) === "success");
+    assert(moddhosting_ChangePackage($params) === "success");
+    assert(moddhosting_UnsuspendAccount($params) === "success");
+    assert($emailRequests === []);
+
+    // A failed setup preserves the result of Create and leaves the next Create free to retry.
+    $emailResponses = [[403, "<html>uku_setup-test-token</html>"], [200, '{"id":4294967296,"domain":"example.com","whmcsId":123}']];
+    assert(moddhosting_CreateAccount($params) === "success");
+    assert(array_slice($hostingEvents, -2) === ["controller", "relay"]);
+    assert($emailRequests[0] === ["domain" => "example.com", "whmcsId" => 123]);
+    assert(str_contains(moddhosting_email_field($params), "Setup failed: Email relay denied setup (HTTP 403)"));
+    assert(moddhosting_CreateAccount($params) === "success");
+    assert(moddhosting_CreateAccount($params) === "success");
+    assert(count($emailRequests) === 2);
+    assert(str_contains(moddhosting_email_field($params), "Config OK · example.com · ID 4294967296"));
+
+    // Saving an override leaves the applied result visible, including when the controller is unavailable.
+    assert(isset(moddhosting_AdminServicesTabFields($offline)["Email Domain"]));
+    $_POST = ["moddhosting_email_domain" => "  Mail.Example.  "];
+    moddhosting_AdminServicesTabFieldsSave($offline);
+    $_POST = [];
+    assert(Capsule::$services[123]["email_domain"] === "mail.example");
+    assert(count($emailRequests) === 2);
+    $field = moddhosting_email_field($params);
+    assert(str_contains($field, 'value="mail.example"') && str_contains($field, "Config OK · example.com"));
+
+    // Failures, including a lost response, retain the last confirmed domain and ID.
+    foreach ([[500, '{"error":{"message":"uku_setup-test-token <unsafe>"}}'], [0, false],
+        [200, "not json"], [200, '{"id":0,"domain":"mail.example","whmcsId":123}'],
+        [200, '{"id":1234,"domain":"other.example","whmcsId":123}'],
+        [200, '{"id":1234,"domain":"mail.example","whmcsId":124}']] as $response) {
+        $emailResponses = [$response];
+        $result = moddhosting_setupEmail($offline);
+        assert($result !== "success" && !str_contains($result, "uku_setup-test-token"));
+        assert(end($emailRequests) === ["domain" => "mail.example", "whmcsId" => 123]);
+        assert(str_contains(moddhosting_email_field($params), "Last configured · example.com · ID 4294967296 · Setup failed:"));
+    }
+    assert(!str_contains(json_encode([$moduleCalls, Capsule::$services]), "uku_setup-test-token"));
+    assert(end($moduleCalls)["action"] === "Email setup failed");
+
+    $emailResponses = array_fill(0, 2, [200, '{"id":1234,"domain":"mail.example","whmcsId":123}']);
+    assert(moddhosting_setupEmail($offline) === "success");
+    assert(moddhosting_setupEmail($offline) === "success");
+    assert(str_contains(moddhosting_email_field($params), "Config OK · mail.example · ID 1234"));
+    foreach ([".", "example.com..", "localhost", "https://example.com", "bad_example.com", [], 42] as $invalid) {
+        assert(moddhosting_updateConfig($params + ["email_domain" => $invalid]) !== "success");
+    }
+    assert(Capsule::$services[123]["email_domain"] === "mail.example");
+    assert(moddhosting_updateConfig($params + ["email_domain" => ""]) === "success");
+    $emailResponses = [[200, '{"id":1234,"domain":"new.example","whmcsId":123}']];
+    assert(moddhosting_setupEmail(array_replace($offline, ["domain" => "NEW.example.", "serviceid" => "123"])) === "success");
+    assert(end($emailRequests) === ["domain" => "new.example", "whmcsId" => 123]);
+    assert(Capsule::$services[123]["email_domain"] === null);
+
+    $requestCount = count($emailRequests);
+    foreach ([0, -1, 2147483648, true, "123x"] as $invalid) {
+        assert(str_contains(moddhosting_setupEmail(["serviceid" => $invalid]), "positive 32-bit"));
+    }
+    assert(str_contains(moddhosting_setupEmail(array_replace($offline, ["domain" => ""])), "save a WHMCS Domain"));
+    Capsule::$busy = true;
+    assert(moddhosting_setupEmail($offline) !== "success");
+    Capsule::$busy = false;
+    Capsule::$settings["emailRelayUrl"] = "http://relay.example";
+    assert(str_contains(moddhosting_setupEmail($offline), "Configure an HTTPS Email Relay URL"));
+    assert(count($emailRequests) === $requestCount);
+    assert(!Capsule::$locked);
 }

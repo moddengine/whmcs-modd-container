@@ -28,6 +28,22 @@ final class ApiClient
 
     public static function forController(string $baseUrl, string $token, int $timeout = 125): self
     {
+        return self::forEndpoint($baseUrl, $token, $timeout);
+    }
+
+    public static function forEmailRelay(string $baseUrl, string $token): self
+    {
+        $parts = parse_url($baseUrl);
+        if (($parts['scheme'] ?? '') !== 'https' || empty($parts['host'])
+            || isset($parts['user']) || isset($parts['pass']) || isset($parts['query']) || isset($parts['fragment'])
+            || filter_var($baseUrl, FILTER_VALIDATE_URL) === false || preg_match('/^uku_[a-zA-Z0-9_-]+$/D', $token) !== 1) {
+            throw new \InvalidArgumentException('Configure an HTTPS Email Relay URL and a UKU setup token in the addon settings.');
+        }
+        return self::forEndpoint($baseUrl, $token, 45);
+    }
+
+    private static function forEndpoint(string $baseUrl, string $token, int $timeout): self
+    {
         $baseUrl = rtrim($baseUrl, '/');
         $key = hash('sha256', $baseUrl . "\0" . $token . "\0" . $timeout);
         return self::$instances[$key] ??= new self($baseUrl, $token, $timeout);
@@ -48,6 +64,7 @@ final class ApiClient
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_TIMEOUT => $this->timeout,
             CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
         ];

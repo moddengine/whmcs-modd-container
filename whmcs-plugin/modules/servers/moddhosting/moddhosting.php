@@ -14,6 +14,7 @@ require_once __DIR__ . '/lib/ApiException.php';
 require_once __DIR__ . '/lib/ApiClient.php';
 require_once __DIR__ . '/lib/MatomoClient.php';
 require_once __DIR__ . '/lib/matomo.php';
+require_once __DIR__ . '/lib/email.php';
 
 /** @return array<string, mixed> */
 function moddhosting_MetaData(): array
@@ -35,6 +36,16 @@ function moddhosting_ConfigOptions(): array
 /** @param array<string, mixed> $params */
 function moddhosting_CreateAccount(array $params): string
 {
+    $result = moddhosting_provision($params);
+    if ($result === 'success') {
+        moddhosting_email_setup($params, automatic: true);
+    }
+    return $result;
+}
+
+/** @param array<string, mixed> $params */
+function moddhosting_provision(array $params): string
+{
     try {
         $stagingDomain = moddhosting_selected_staging($params);
         return moddhosting_call($params, 'PUT', '/v1/services/' . moddhosting_service_id($params), [
@@ -55,27 +66,32 @@ function moddhosting_CreateAccount(array $params): string
 /** @return array<string, string> */
 function moddhosting_AdminCustomButtonArray(): array
 {
-    return ['Deploy' => 'deploy', 'Reconnect DNS' => 'reconnectDns'];
+    return ['Deploy' => 'deploy', 'Reconnect DNS' => 'reconnectDns', 'Setup Email' => 'setupEmail'];
 }
 
 /** @param array<string, mixed> $params */
 function moddhosting_deploy(array $params): string
 {
     $params['force_redeploy'] = true;
-    return moddhosting_CreateAccount($params);
+    return moddhosting_provision($params);
 }
 
 /** @param array<string, mixed> $params */
 function moddhosting_ChangePackage(array $params): string
 {
-    $params['force_redeploy'] = true;
-    return moddhosting_CreateAccount($params);
+    return moddhosting_deploy($params);
 }
 
 /** @param array<string, mixed> $params */
 function moddhosting_reconnectDns(array $params): string
 {
     return moddhosting_call($params, 'POST', '/v1/services/' . moddhosting_service_id($params) . '/dns/reconnect');
+}
+
+/** @param array<string, mixed> $params */
+function moddhosting_setupEmail(array $params): string
+{
+    return moddhosting_email_setup($params);
 }
 
 /** @param array<string, mixed> $params */
@@ -123,7 +139,10 @@ function moddhosting_TestConnection(array $params): array
  */
 function moddhosting_AdminServicesTabFields(array $params): array
 {
-    $matomo = ['Matomo Site ID' => moddhosting_matomo_field($params)];
+    $localFields = [
+        'Matomo Site ID' => moddhosting_matomo_field($params),
+        'Email Domain' => moddhosting_email_field($params),
+    ];
     try {
         $client = moddhosting_client($params);
         $versions = moddhosting_versions($params);
@@ -153,7 +172,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
         $defaultStaging = moddhosting_default_staging_label((string) ($params['domain'] ?? ''));
         $field = static fn(string $name, string $value): string => '<span data-moddhosting-status="' . $name . '">' . $value . '</span>';
         $autoRefresh = moddhosting_action_running($status) ? moddhosting_status_refresh_script() : '';
-        return $matomo + [
+        return $localFields + [
             'Image Version' => '<input type="hidden" name="moddhosting_fields" value="1"><select name="modulefields[0]" class="form-control">' . $versionOptions . '</select>',
             'Staging Hostname' => '<div class="input-group" style="max-width:500px"><input type="text" name="modulefields[1]" class="form-control" maxlength="32" value="'
                 . moddhosting_escape($stagingLabel) . '" placeholder="Blank to disable staging"><span class="input-group-addon">.'
@@ -170,7 +189,7 @@ function moddhosting_AdminServicesTabFields(array $params): array
             'Controller Error' => $field('error', moddhosting_escape((string) ($status['last_error'] ?? ''))),
         ];
     } catch (\Throwable $error) {
-        return $matomo + ['Controller Error' => moddhosting_escape($error->getMessage())];
+        return $localFields + ['Controller Error' => moddhosting_escape($error->getMessage())];
     }
 }
 
@@ -183,6 +202,9 @@ function moddhosting_AdminServicesTabFieldsSave(array $params, ?array $versions 
     $config = [];
     if (array_key_exists('moddhosting_matomo_id', $_POST)) {
         $config['matomo_id'] = $_POST['moddhosting_matomo_id'];
+    }
+    if (array_key_exists('moddhosting_email_domain', $_POST)) {
+        $config['email_domain'] = $_POST['moddhosting_email_domain'];
     }
     if (($_POST['moddhosting_fields'] ?? '') === '1') {
         $fields = $_POST['modulefields'] ?? [];
@@ -203,7 +225,7 @@ function moddhosting_AdminServicesTabFieldsSave(array $params, ?array $versions 
 function moddhosting_updateConfig(array $params, ?array $versions = null): string
 {
     try {
-        $config = array_intersect_key(array_merge($params, $_POST), array_flip(['image_version', 'staging_hostname', 'matomo_id']));
+        $config = array_intersect_key(array_merge($params, $_POST), array_flip(['image_version', 'staging_hostname', 'matomo_id', 'email_domain']));
         moddhosting_save_service_config($params, $config, $versions);
         return 'success';
     } catch (\Throwable $error) {
@@ -246,8 +268,12 @@ function moddhosting_save_service_config(array $params, array $config, ?array $v
         $values['matomo_attempt'] = null;
         $values['matomo_last_error'] = null;
     }
+    if (array_key_exists('email_domain', $config)) {
+        $domain = moddhosting_parse_email_domain($config['email_domain']);
+        $values['email_domain'] = $domain === '' ? null : $domain;
+    }
     if ($values === []) {
-        throw new \InvalidArgumentException('Provide image_version, staging_hostname or matomo_id.');
+        throw new \InvalidArgumentException('Provide image_version, staging_hostname, matomo_id or email_domain.');
     }
     $save = static function () use ($params, $values, $preservePending): void {
         if (array_key_exists('matomo_id', $values)) {
@@ -266,7 +292,7 @@ function moddhosting_save_service_config(array $params, array $config, ?array $v
         );
     };
     if (array_key_exists('matomo_id', $values)) {
-        moddhosting_matomo_lock((int) $params['serviceid'], $save);
+        moddhosting_service_lock('matomo', (int) $params['serviceid'], $save);
     } else {
         $save();
     }
@@ -540,6 +566,26 @@ function moddhosting_dns_summary(array $status): string
 function moddhosting_service_id(array $params): string
 {
     return 'whmcs-' . (int) $params['serviceid'];
+}
+
+/**
+ * @template T
+ * @param callable(): T $callback
+ * @return T
+ */
+function moddhosting_service_lock(string $operation, int $serviceId, callable $callback): mixed
+{
+    $connection = Capsule::connection();
+    $name = 'moddhosting:' . $operation . ':' . $serviceId;
+    $lock = $connection->selectOne('SELECT GET_LOCK(?, 30) AS acquired', [$name]);
+    if ((int) ($lock->acquired ?? 0) !== 1) {
+        throw new \RuntimeException(ucfirst($operation) . ' service configuration is busy; retry later.');
+    }
+    try {
+        return $callback();
+    } finally {
+        $connection->selectOne('SELECT RELEASE_LOCK(?) AS released', [$name]);
+    }
 }
 
 function moddhosting_escape(string $value): string
